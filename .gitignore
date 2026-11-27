@@ -1,0 +1,11 @@
+.venv/
+.venv_*/
+__pycache__/
+*.py[cod]
+build/
+dist/
+installer_dist/
+node_modules/
+*.db
+license.json
+assets/google_oauth_client.json

@@ -1,0 +1,426 @@
+# RECOVERED: depyo output corrected from CPython 3.12 disassembly
+import json
+from copy import deepcopy
+import threading
+import time
+from abc import ABC
+import requests
+from loguru import logger
+from src.module.model import ChannelInfo, Video, VideoType
+from src.utils import get_channels_info
+from src.task_runtime import post_with_stop
+from src.youtube_auth import (
+    sapisid_cookie_fingerprint,
+    studio_authorization_header,
+)
+from src.video_publishing import copyright_check_status, restriction_details
+
+
+class YouTubeRequestError(RuntimeError):
+    """A sanitized YouTube HTTP/response error which preserves its status code."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_excerpt: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_excerpt = response_excerpt
+
+
+def _safe_response_excerpt(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+        message = payload.get("error", {}).get("message", "") if isinstance(payload, dict) else ""
+    except (ValueError, AttributeError):
+        message = ""
+    # Never copy an arbitrary response body into exceptions: those exceptions are
+    # logged by the polling layer and the body is not guaranteed to be secret-free.
+    return str(message or "").strip()[:500]
+
+
+def _response_json_or_error(response: requests.Response, action: str) -> dict:
+    excerpt = _safe_response_excerpt(response)
+    if response.status_code != 200:
+        suffix = f": {excerpt}" if excerpt else ""
+        raise YouTubeRequestError(
+            f"YouTube {action} failed (HTTP {response.status_code}){suffix}",
+            status_code=response.status_code,
+            response_excerpt=excerpt,
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise YouTubeRequestError(
+            f"YouTube {action} returned invalid JSON",
+            status_code=response.status_code,
+            response_excerpt=excerpt,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise YouTubeRequestError(
+            f"YouTube {action} returned an unexpected response",
+            status_code=response.status_code,
+            response_excerpt=excerpt,
+        )
+    return payload
+
+
+def studio_video_from_payload(video):
+    thumbnails = (video.get("thumbnailDetails") or {}).get("thumbnails") or [{}]
+    audio_language = video.get("audioLanguage") or ""
+    if isinstance(audio_language, dict):
+        audio_language = audio_language.get("languageCode") or ""
+    return Video(
+        id=video.get("videoId", ""), channel_id=video.get("channelId", ""),
+        title=video.get("title", ""), description=video.get("description", ""),
+        duration_ms=video.get("videoDurationMs", 0), thumbnail=thumbnails[0].get("url", ""),
+        thumbnail_details=video.get("thumbnailDetails") or {},
+        thumbnail_editor_state=video.get("thumbnailEditorState") or {},
+        video_status=video.get("status", ""), audio_language=str(audio_language).strip(),
+        privacy=video.get("privacy", ""), draft_status=video.get("draftStatus", ""),
+        scheduled_publishing_details=video.get("scheduledPublishingDetails", ""),
+        scheduled_creator_visibility=video.get("scheduledCreatorVisibility", ""),
+        visibility=video.get("visibility", ""), time_created_seconds=video.get("timeCreatedSeconds", ""),
+        time_published_seconds=video.get("timePublishedSeconds", ""),
+        restriction_details=restriction_details(video), copyright_check_status=copyright_check_status(video),
+    )
+
+
+class IModule(ABC):
+    EATS = "AXAuXyagZ24uKnNz0kYZbLTt32KGDRxhKqK2ns7At7Rkxw4UXW19g-oH1ng4py8No7EiqwNid9eQAFhJ7_8XJFiitSaWQdlXlG7nmJStO8tVWrrAAQ=="; CLIENT_SCREEN_NONCE = "8Z1g2AhnbTXfVuBp"; CHALLENGE = "a=6&a2=3&b=UAAoAmaAwwDIrKcvn9_rgzH-Jr4&c=1746756602&d=62&e3=UCAICychz3FdwEAyD6Rv-IRQ&c1a=1&hh=PSyUV3k8pO-Z9_6qmFQtKyKipjuIekgJtEtZvvmqpn0"; BOT_GUARD_RESPONSE = "$euU55b1RAAbvRbg0z0XewMv_S0uMtXGnADQBEArZ1HMQG4pgLXVbdPcdDixwJ1GZIjKtUDtG9tZmNJbg9W0ElVuifwYo-lT9CfcGMbryngAAACzOAAAA8fQBB-IASY3N5JAhIeAY5HKAdoI0yEECI_IJZ-vRui2z4nzlEoLB50R2iz607ou69KS463F-Ncivzmqmrurv2jJXSyl-d0TbLu7WaW-WEbsFBG4ZglwEBE_ccLro1tMinuYe2g0-E842CWJroVmf6sc716sKgXbH8XKn5WXsRjXqeuVHSZ8g-ds5FQLBMCLVRU7zVhpijepG729n8mztRnv3IuDL4sWycDhphf0IyIxPhQ_vVeuwX9En5nue0pZjeNetiMIFmI1acJDq474vIS9dU6XDknDze6gN0QbjXWrsYMYyO1zj5sMiLShfljFfCp7dp2f0LHOmAPGJdklHWgMXIYOmZW2wDi5FmcZBK12hx4YUrtMxXtXv1l6BJftZCzR0apgb5kDcR56jtHzxQCGp4kaNPV5SLO4oUV7vlkUCL2yc_a9seNhRnDeIM3ToQYRv7M1nQpPDfeiFaP4-X3WtlvdNFit_0UQV8BYImVdnnTdulniHz2roAg3PoMhtLT0QFUE5UfE6gupz1A35kHrb9UAqMtAgC0JSEI9Hn2m64wviQH5YyOoYlxNIGYz7vFGDqXX_yquJ57zosGcmgGwPulJjh_cUOBXjnwGRFAgTdvHkaIcwQNmWdJUWT4yxhy7-9AsLAravJUjygijZfajXrVEd9Dhv2GvyKSDGO_8WCunYImbXNy6bjfdO31HD9B0Bb9Yaqsyq3TFlUy1giqhdDJKRVZ2fQpjIKApaXITB-uLJQfleS6VVCKeMfwrtty056wlNQVuWuaQ8-XqDgOJclKHt8wOEMSEBEpwVc5ocBjEZ-wBLiorr7G1q66Ulp-HF4_Iwh7xUULUhH1M5FupXG93XQY9AR1M-MWeqQ07AIJ7FKGthd0wLuTavQ-1xQrymxWULSIuyaC7hpQxf1cIVh7EE2YrOhKVBowEe1LnFCUgCGXPBOd9TrQnkGLyKcYAOwzWdII7Zl5RPfHmPLUyk-niJ1Ygey4Dhmxzv9g8udrOvGr9mZDtIjKr-1z1cl-W2lDXWuRjfiRYNgOhPQOCXq21ULvlEOtR-9C2EVIABVXd14rGtJzsuXUwnr6CD29Odm64nbRPCa3leXuz1pOR1QOi0984sblJ0B_lRIGiXVd4RoUewatihEyzSGg2MFV1k2CdYrxK_yfv0hCHWc-JmixNmWFjXp7PrQvD3NMWZlb5Wb9J1mgl6nnxT7gPGo07xvYpiRBRwA6HU7QFcnP7yYsekWGXte5Sk3QJsu2m1lWpp-R9jiqpfw6Qf8zjwDVgbjXaq7pkrCyJIZeiBgDEWow2IbKa0GlRPuvmxLj3QToOjqCCqCXAtRiYGJzeyH0dd6HdIaJckCHYE1KiWp1SifXILE9TwQs2izR55MteVSZ_D9k3n0GBNnJXhUv5LREKWCFo5i0IgFMIFUEYA9uAaA_KPIxbfNYwy5VL6GvHFctg8RdHvZb6-ZYpieMTnkT2srMF20Yh148zsAIoZ3Z6J6upgwljNeHqOUXYVtIORaPUt7Sq54x67YZ7eVKU1-eA-qpqqAJ9jfTXjalxYRe2RbScWuluGr7lfL4vT5CL_ySttj-4doOtBJgVW4YRkhKjicZpBZg_uZizhgzB3Q7Q"
+    pass
+
+    _SESSION_TOKEN_TTL_SECONDS = 120.0
+    _SESSION_TOKEN_CACHE: dict[tuple[str, ...], tuple[str, float]] = {}
+    _SESSION_TOKEN_CACHE_LOCK = threading.RLock()
+    _SESSION_TOKEN_FETCH_LOCKS: dict[tuple[str, ...], threading.Lock] = {}
+
+    @classmethod
+    def _session_token_cache_key(cls, channel_info) -> tuple[str, ...]:
+        return (
+            str(getattr(channel_info, "id", "") or ""),
+            sapisid_cookie_fingerprint(
+                getattr(channel_info, "cookies", None)
+            ),
+            str(getattr(channel_info, "challenge", "") or ""),
+            str(getattr(channel_info, "botguardResponse", "") or ""),
+            str(getattr(channel_info, "delegated_session_id", "") or ""),
+            str(getattr(channel_info, "role", "") or ""),
+            json.dumps(getattr(channel_info, "studio_context", {}) or {}, sort_keys=True),
+        )
+
+    @classmethod
+    def _cached_session_token(cls, key: tuple[str, ...]) -> str | None:
+        with cls._SESSION_TOKEN_CACHE_LOCK:
+            cached = cls._SESSION_TOKEN_CACHE.get(key)
+            if cached is None:
+                return None
+            token, created_at = cached
+            if time.monotonic() - created_at >= cls._SESSION_TOKEN_TTL_SECONDS:
+                cls._SESSION_TOKEN_CACHE.pop(key, None)
+                return None
+            return token
+
+    @classmethod
+    def _session_token_fetch_lock(
+        cls, key: tuple[str, ...]
+    ) -> threading.Lock:
+        with cls._SESSION_TOKEN_CACHE_LOCK:
+            return cls._SESSION_TOKEN_FETCH_LOCKS.setdefault(key, threading.Lock())
+
+    @classmethod
+    def invalidate_session_token_cache(cls, channel_id: str) -> None:
+        """Remove cached session tokens for one channel before a real check."""
+        clean_channel_id = str(channel_id or "").strip()
+        with cls._SESSION_TOKEN_CACHE_LOCK:
+            for key in list(cls._SESSION_TOKEN_CACHE):
+                if key and key[0] == clean_channel_id:
+                    cls._SESSION_TOKEN_CACHE.pop(key, None)
+
+    def _list_videos(self, channel_id: str, video_type: VideoType, limit: int=50) -> list[Video]:
+        channel_info = get_channels_info(channel_id); cookie_string = "; ".join([f"{cookie['name']}={cookie['value']}" for cookie in channel_info.cookies]); session_token = self._get_session_token(channel_info)
+
+        payload = {"filter": {"and": {"operands": [{"channelIdIs": {"value": channel_info.id}},
+    {"and": {"operands": [{"or": {"operands": [{"and": {"operands": [{"privacyIs": {"value": video_type.value}},
+    {"not": {"operand": {"isDraft": {}}}},
+    {"not": {"operand": {"isScheduledToBePublic": {}}}}]}}]}},
+    {"and": {"operands": [{"videoOriginIs": {"value": "VIDEO_ORIGIN_UPLOAD"}},
+    {"not": {"operand": {"contentTypeIs": {"value": "CREATOR_CONTENT_TYPE_SHORTS"}}}}]}},
+    {"not": {"operand": {"tvfilmTypeIs": {"value": "VIDEO_TVFILM_TYPE_MOVIE"}}}},
+    {"not": {"operand": {"tvfilmTypeIs": {"value": "VIDEO_TVFILM_TYPE_EPISODE"}}}},
+    {"not": {"operand": {"tvfilmTypeIs": {"value": "VIDEO_TVFILM_TYPE_EVENT"}}}}]}}]}}, "order": "VIDEO_ORDER_DISPLAY_TIME_DESC", "pageSize": limit, "mask": {"channelId": True,
+
+    "videoId": True, "lengthSeconds": True, "livestream": {"all": True},
+
+    "publicLivestream": {"all": True}, "origin": True, "premiere": {"all": True},
+
+    "publicPremiere": {"all": True}, "status": True, "thumbnailDetails": {"all": True}, "title": True, "draftStatus": True, "downloadUrl": True, "watchUrl": True, "shareUrl": True, "permissions": {"all": True}, "features": {"all": True}, "collaboration": {"all": True}, "timeCreatedSeconds": True, "timePublishedSeconds": True, "privacy": True, "contentOwnershipModelSettings": {"all": True}, "contentType": True, "publicShorts": {"all": True},
+
+    "podcastRssMetadata": {"all": True}, "videoLinkageShortsAttribution": {"all": True}, "alteredContentSettings": {"all": True}, "tvfilmMetadata": {"all": True}, "videoCreatorExperiment": {"all": True}, "responseStatus": {"all": True}, "statusDetails": {"all": True}, "description": True, "titleFormattedString": {"all": True}, "descriptionDetails": {"all": True}, "descriptionFormattedString": {"all": True}, "titleDetails": {"all": True}, "videoDurationMs": True, "publicMetrics": {"all": True}, "audienceRestriction": {"all": True}, "releaseInfo": {"all": True}, "privateMetrics": {"dislikeCount": True}, "allRestrictions": {"all": True}, "inlineEditProcessingStatus": True, "videoPrechecks": {"all": True}, "shorts": {"all": True}, "selfCertification": {"all": True}, "videoStreamUrl": True,
+
+    "thumbnailEditorState": {"all": True}, "videoResolutions": {"all": True}, "scheduledPublishingDetails": {"all": True},
+
+    "visibility": {"all": True},
+    "privateShare": {"all": True}, "sponsorsOnly": {"all": True}, "unlistedExpired": True, "videoTrailers": {"all": True}, "remix": {"isSource": True}, "isPaygated": True}, "context": {"client": {"clientName": 62, "clientVersion": "1.20250910.04.01", "hl": "vi", "gl": "VN", "experimentsToken": "", "utcOffsetMinutes": 420, "userInterfaceTheme": "USER_INTERFACE_THEME_DARK", "screenWidthPoints": 2560, "screenHeightPoints": 578, "screenPixelDensity": 2, "screenDensityFloat": 1.5}, "request": {"returnLogEntry": True, "internalExperimentFlags": [], "eats": "AQH2GtwBdPiAGJ2T8rGKWNAiZQVd_vf3vyyp2_FoLHT9dGCNih8CNaBwmazsAHXcXYwinRh-c35GmB1fvnAapWD1jXwQpZnFLpu81NzfUTeuNdFMKSTZfCxbEJYI", "sessionInfo": {"token": session_token}, "consistencyTokenJars": []}, "user": {"onBehalfOfUser": channel_info.delegated_session_id, "delegationContext": {"externalChannelId": channel_info.id, "roleType": {"channelRoleType": channel_info.role}}, "serializedDelegationContext": ""}, "clickTracking": {"visualElement": {"veType": 31_402}}, "clientScreenNonce": "qplwEzmZ-f8Ac7kX"}}; headers = {"origin": "https://studio.youtube.com", "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "cookie": cookie_string, "content-type": "application/json", "authorization": studio_authorization_header(channel_info.cookies)}; url = "https://studio.youtube.com/youtubei/v1/creator/list_creator_videos?alt=json"; response = post_with_stop(url=url, headers=headers, json=payload)
+
+        res = response.json(); videos = []
+        for item in res.get("videos", []):
+            video = Video(id=item["videoId"], title=item["title"], description=item["description"], channel_id=item["channelId"], duration_ms=item["videoDurationMs"], thumbnail=item["thumbnailDetails"]["thumbnails"][0]["url"])
+            videos.append(video)
+        return videos
+
+        cookie = None
+    def _get_video_info(self, video_id: str, channel_id: str, *, critical_read=False) -> Video:
+        channel_info = get_channels_info(channel_id); cookie_string = "; ".join([f"{cookie['name']}={cookie['value']}" for cookie in channel_info.cookies]); session_token = self._get_session_token(channel_info); url = "https://studio.youtube.com/youtubei/v1/creator/get_creator_videos?alt=json"; headers = {"origin": "https://studio.youtube.com", "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "cookie": cookie_string, "content-type": "application/json", "authorization": studio_authorization_header(channel_info.cookies)}
+
+        payload = {"context": {"client": {"clientName": 62, "clientVersion": "1.20250905.02.00", "hl": "vi", "gl": "VN", "experimentsToken": "", "utcOffsetMinutes": 420, "userInterfaceTheme": "USER_INTERFACE_THEME_DARK", "screenWidthPoints": 2560, "screenHeightPoints": 544, "screenPixelDensity": 2, "screenDensityFloat": 1.5}, "request": {"returnLogEntry": True, "internalExperimentFlags": [], "eats": "AWSNWa2q-ubSn35ywNe6Myhvveym5w_4-S_D3p_lk689PZciFEJrTquCWvtc1PgiFObkpeU638J5M3CTcvCmegVUfkseMdAJaVgmOWE_S5SHQpzuXaZu1I7szwPPUQ==", "sessionInfo": {"token": session_token}, "consistencyTokenJars": []}, "user": {"onBehalfOfUser": channel_info.delegated_session_id, "delegationContext": {"externalChannelId": channel_info.id, "roleType": {"channelRoleType": channel_info.role}}, "serializedDelegationContext": ""}, "clickTracking": {"visualElement": {"veType": 74_615}}, "clientScreenNonce": "rQg33g-jDrOyosOi"}, "failOnError": True, "videoIds": [video_id], "mask": {"channelId": True, "downloadUrl": True, "origin": True, "premiere": {"all": True},
+
+    "privacy": True, "videoId": True, "title": True, "titleDetails": {"all": True},
+
+    "description": True, "descriptionDetails": {"all": True}, "releaseInfo": {"all": True},
+
+    "podcastRssMetadata": {"all": True}, "status": True, "permissions": {"all": True}, "draftStatus": True, "features": {"all": True}, "livestream": {"all": True}, "videoDurationMs": True, "statusDetails": {"all": True}, "inlineEditProcessingStatus": True, "monetization": {"all": True}, "allRestrictions": {"all": True}, "videoPrechecks": {"all": True}, "audienceRestriction": {"all": True}, "mfkSettings": {"all": True}, "selfCertification": {"all": True},
+
+    "videoStreamUrl": True, "visibility": {"all": True}, "shorts": {"all": True}, "responseStatus": {"all": True}, "contentType": True, "videoAdvertiserSpecificAgeGates": {"all": True}, "claimDetails": {"all": True}, "commentsDisabledInternally": True, "music": {"all": True}, "ownedClaimDetails": {"all": True}, "timePublishedSeconds": True, "uncaptionedReason": True, "remix": {"all": True}, "contentOwnershipModelSettings": {"all": True}, "googleAdsVideoLinks": {"all": True}, "dubSettings": {"all": True}, "alteredContentSettings": {"all": True}, "collaboration": {"all": True}, "thumbnailEditorState": {"all": True}, "thumbnailDetails": {"all": True}, "videoCreatorExperiment": {"all": True}, "lengthSeconds": True, "publicLivestream": {"all": True}, "publicPremiere": {"all": True},
+
+    "tvfilmMetadata": {"all": True}, "shareUrl": True,
+
+    "scheduledPublishingDetails": {"all": True},
+
+    "privateShare": {"all": True},
+
+    "sponsorsOnly": {"all": True}, "unlistedExpired": True, "videoTrailers": {"all": True}, "isPaygated": True, "suggestions": {"all": True}, "tvType": {"all": True}, "genres": {"all": True},
+
+    "episode": {"all": True}, "copyrightSummary": {"all": True}, "productSelection": {"all": True}, "productAutotaggingSettings": {"all": True}, "videoLinkageShortsAttribution": {"all": True}, "allowEmbed": True, "allowRatings": True, "ageRestriction": True, "audioLanguage": {"all": True}, "category": True, "commentFilter": True, "commentSettings": {"all": True}, "crowdsourcingEnabled": True, "dateRecorded": {"all": True}, "defaultCommentSortOrder": True, "descriptionFormattedString": {"all": True}, "gameTitle": {"all": True}, "license": True, "liveChat": {"all": True}, "location": {"all": True}, "metadataLanguage": {"all": True}, "paidProductPlacement": True, "paidPoliticalContent": {"all": True}, "publishing": {"all": True}, "tags": {"all": True},
+
+    "titleFormattedString": {"all": True}, "viewCountIsHidden": True, "autoChapterSettings": {"all": True}, "autoPlacesMentionedSettings": {"all": True}, "videoArtworkEditorState": {"all": True}, "learningConceptSettings": {"all": True}, "videoEditorProject": {"all": True}, "originalFilename": True, "timeCreatedSeconds": True,
+
+    "videoResolutions": {"all": True}, "watchUrl": True, "publicShorts": {"all": True}, "publicMetrics": {"all": True}, "academicLearning": {"all": True}, "manualPlacesMentionedPlaces": {"all": True}, "autoProductsSettings": {"all": True},
+    "videoAutoSummarySettings": {"all": True}, "issues": {"all": True}}, "criticalRead": bool(critical_read)}
+        if critical_read:
+            payload["context"] = self._current_studio_context(channel_info, session_token, base_context=payload["context"])
+            payload["mask"]["scheduledCreatorVisibility"] = {"all": True}
+            headers["user-agent"] = payload["context"]["client"].get("userAgent") or headers["user-agent"]
+        response = post_with_stop(url=url, headers=headers, json=payload)
+        res = _response_json_or_error(response, "video status check")
+        videos = res.get("videos")
+        if not isinstance(videos, list) or not videos or not isinstance(videos[0], dict):
+            raise YouTubeRequestError(
+                "YouTube video status response does not contain the requested video",
+                status_code=response.status_code,
+                response_excerpt=_safe_response_excerpt(response),
+            )
+        return studio_video_from_payload(videos[0])
+
+        cookie = None
+    def _current_studio_context(self, channel, token, *, base_context=None):
+        context = deepcopy(base_context) if base_context is not None else self._build_context(
+            channel.id, channel.role, channel.delegated_session_id, extra_request_fields={"sessionInfo":{"token":token}})
+        captured = getattr(channel, "studio_context", {}) or {}
+        captured_id = (captured.get("user", {}).get("delegationContext") or {}).get("externalChannelId")
+        if captured_id and captured_id != channel.id:
+            raise ValueError("Phiên Studio thuộc kênh khác; chưa gửi yêu cầu.")
+        for name in ("client", "user", "clientScreenNonce"):
+            if captured.get(name):
+                context[name] = ({**context[name], **deepcopy(captured[name])}
+                                 if isinstance(context.get(name), dict) and isinstance(captured[name], dict)
+                                 else deepcopy(captured[name]))
+        if isinstance(captured.get("request"), dict):
+            context["request"] = deepcopy(captured["request"])
+        context.setdefault("request", {}).pop("reauthRequestInfo", None)
+        context["request"]["sessionInfo"] = {"token":token}
+        return context
+
+    def _build_context(self, channel_id: str, role: str, delegated_session_id: str, *, client_version: str="1.20260311.03.00", hl: str="en", theme: str="USER_INTERFACE_THEME_DARK", screen_width: int=1920, screen_height: int=945, include_on_behalf_of_user: bool=True, extra_request_fields: dict | None=None) -> dict:
+        """Build the standard YouTube Studio API context payload."""
+        user_block = {"delegationContext": {"externalChannelId": channel_id, "roleType": {"channelRoleType": role}}, "serializedDelegationContext": ""}
+        if include_on_behalf_of_user:
+            user_block["onBehalfOfUser"] = delegated_session_id
+        request_block = {"returnLogEntry": True, "internalExperimentFlags": [], "eats": self.EATS, "consistencyTokenJars": []}
+        if extra_request_fields:
+            request_block.update(extra_request_fields)
+        return {"client": {"clientName": 62, "clientVersion": client_version, "hl": hl, "gl": "VN", "experimentsToken": "", "utcOffsetMinutes": 420, "userInterfaceTheme": theme, "screenWidthPoints": screen_width, "screenHeightPoints": screen_height, "screenPixelDensity": 1, "screenDensityFloat": 1}, "request": request_block, "user": user_block, "clickTracking": {"visualElement": {"veType": 74_618}}, "clientScreenNonce": self.CLIENT_SCREEN_NONCE}
+    def _get_session_token(self, channel_info) -> str:
+        """
+        Obtain a YouTube Studio session token for the given channel.
+
+        Args:
+            channel_info: A ChannelInfo dataclass instance (from src.utils).
+
+        Returns:
+            The session token string.
+
+        Raises:
+            Exception: If YouTube has changed its auth algorithm.
+        """
+        original_cache_key = self._session_token_cache_key(channel_info)
+        cached_token = self._cached_session_token(original_cache_key)
+        if cached_token:
+            return cached_token
+
+        fetch_lock = self._session_token_fetch_lock(original_cache_key)
+        with fetch_lock:
+            # Several upload workers often request a token at the same time.
+            # Re-check after acquiring the per-channel lock to avoid a request
+            # stampede against att/esr.
+            cached_token = self._cached_session_token(original_cache_key)
+            if cached_token:
+                return cached_token
+            return self._fetch_session_token_uncached(
+                channel_info, original_cache_key=original_cache_key
+            )
+
+    def _fetch_session_token_uncached(
+        self,
+        channel_info,
+        *,
+        original_cache_key: tuple[str, ...],
+    ) -> str:
+        channel_id = channel_info.id
+        role = channel_info.role
+        delegated_session_id = channel_info.delegated_session_id
+        challenge = channel_info.challenge
+        bot_guard_response = channel_info.botguardResponse
+        user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        def session_context() -> dict:
+            context = self._build_context(channel_id, role, delegated_session_id)
+            captured = getattr(channel_info, "studio_context", {}) or {}
+            if isinstance(captured, dict):
+                # Use the browser's actual client/delegation context rather than
+                # inventing a client version or discarding serialized delegation.
+                user = captured.get("user")
+                if isinstance(user, dict):
+                    captured_id = (user.get("delegationContext") or {}).get("externalChannelId")
+                    if captured_id and captured_id != channel_id:
+                        raise YouTubeRequestError("Studio context belongs to a different channel; reload the selected channel")
+                for field in ("client", "user", "clientScreenNonce"):
+                    if captured.get(field):
+                        context[field] = deepcopy(captured[field])
+                if isinstance(captured.get("request"), dict):
+                    context["request"] = deepcopy(captured["request"])
+                    context["request"].pop("sessionInfo", None)
+                    context["request"].pop("reauthRequestInfo", None)
+            return context
+
+        def authenticated_headers() -> dict:
+            # SAPISIDHASH embeds a timestamp. Build it immediately before each
+            # request instead of reusing the value persisted during scanning.
+            return {
+                "origin": "https://studio.youtube.com",
+                "user-agent": (getattr(channel_info, "studio_context", {}) or {}).get("client", {}).get("userAgent") or user_agent,
+                "cookie": channel_info.cookie_string(),
+                "content-type": "application/json",
+                "authorization": studio_authorization_header(
+                    channel_info.cookies
+                ),
+            }
+
+        def fetch_attestation_context() -> dict:
+            response = post_with_stop(
+                url="https://studio.youtube.com/youtubei/v1/att/esr?alt=json",
+                headers=authenticated_headers(),
+                json={
+                    "context": session_context(),
+                    "challenge": challenge,
+                    "botguardResponse": bot_guard_response,
+                    "xguardClientStatus": 0,
+                },
+            )
+            return _response_json_or_error(response, "attestation request")
+
+        def fetch_reauth_context(ivctx: str) -> dict:
+            response = post_with_stop(
+                url="https://studio.youtube.com/youtubei/v1/security/get_web_reauth_url?alt=json",
+                headers=authenticated_headers(),
+                json={
+                    "context": session_context(),
+                    "continueUrl": "https://studio.youtube.com/reauth",
+                    "flow": "REAUTH_FLOW_YT_STUDIO_COLD_LOAD",
+                    "ivctx": ivctx,
+                    "challenge": challenge,
+                    "botguardResponse": bot_guard_response,
+                },
+            )
+            return _response_json_or_error(response, "reauth request")
+
+        for attempt in range(2):
+            try:
+                res = fetch_attestation_context()
+                if not res.get("ctx"):
+                    raise YouTubeRequestError("YouTube attestation response is missing ctx")
+                res = fetch_reauth_context(res["ctx"])
+                if not res.get("encodedReauthProofToken") or not res.get("sessionRiskCtx"):
+                    raise YouTubeRequestError("YouTube reauth response is missing encodedReauthProofToken or sessionRiskCtx")
+                break
+            except YouTubeRequestError as exc:
+                # Refresh one time for malformed/expired attestation state.
+                # Do not hide permission errors, rate limits or server failures.
+                if attempt or exc.status_code not in {None, 400}:
+                    raise
+                logger.warning("Refreshing Studio authentication after a rejected token request: channel={} HTTP={}", channel_id, exc.status_code)
+                from src.channel_refresh import refresh_challenge_and_botguard
+                refresh_challenge_and_botguard(channel_id)
+                refreshed = get_channels_info(channel_id)
+                if refreshed is None:
+                    raise YouTubeRequestError("Channel was removed while refreshing Studio authentication") from exc
+                channel_info = refreshed
+                role = channel_info.role
+                challenge = channel_info.challenge
+                bot_guard_response = channel_info.botguardResponse
+                delegated_session_id = channel_info.delegated_session_id
+        encoded_reauth_proof_token = res["encodedReauthProofToken"]
+        session_risk_ctx = res["sessionRiskCtx"]
+
+        context = session_context()
+        # Keep the session-token endpoint's original user-block shape. The
+        # reauth proof carries the delegation for this request.
+        context["user"].pop("onBehalfOfUser", None)
+        context["request"]["reauthRequestInfo"] = {
+            "encodedReauthProofToken": encoded_reauth_proof_token
+        }
+        response = post_with_stop(
+            url="https://studio.youtube.com/youtubei/v1/ars/grst?alt=json",
+            headers=authenticated_headers(),
+            json={
+                "context": context,
+                "ctx": session_risk_ctx,
+            },
+        )
+        res = _response_json_or_error(response, "session token request")
+        session_token = res.get("sessionToken")
+        if not session_token:
+            raise YouTubeRequestError(
+                "YouTube session token response is missing sessionToken",
+                status_code=response.status_code,
+                response_excerpt=_safe_response_excerpt(response),
+            )
+        created_at = time.monotonic()
+        refreshed_cache_key = self._session_token_cache_key(channel_info)
+        with self._SESSION_TOKEN_CACHE_LOCK:
+            self._SESSION_TOKEN_CACHE[original_cache_key] = (
+                session_token,
+                created_at,
+            )
+            self._SESSION_TOKEN_CACHE[refreshed_cache_key] = (
+                session_token,
+                created_at,
+            )
+        return session_token
+
+
+def validate_channel_session_token(channel_id: str) -> bool:
+    """Force YouTube to issue a new session token for a stored channel."""
+    clean_channel_id = str(channel_id or "").strip()
+    channel_info = get_channels_info(clean_channel_id)
+    if channel_info is None:
+        raise ValueError(f"Channel '{clean_channel_id}' not found in database")
+    IModule.invalidate_session_token_cache(clean_channel_id)
+    token = IModule()._get_session_token(channel_info)
+    if not token:
+        raise YouTubeRequestError(
+            "YouTube session token validation returned an empty token"
+        )
+    return True

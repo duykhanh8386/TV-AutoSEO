@@ -1,0 +1,810 @@
+# RECOVERED: reconstructed from CPython 3.12 bytecode
+import errno, json, math, os, re, stat, subprocess, sys, tempfile, threading, time
+from enum import Enum
+from pathlib import Path
+from loguru import logger
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from src.module.model import ChannelInfo
+from src.task_runtime import (
+    TaskStopped,
+    current_run_context,
+    register_driver,
+    run_owned_process,
+    wait_interruptibly,
+)
+
+
+FFPROBE_MAX_ATTEMPTS = 3
+FFPROBE_RETRY_DELAY_SECONDS = 0.25
+FFPROBE_DIAGNOSTIC_LIMIT = 500
+
+
+class FFprobeErrorCategory(str, Enum):
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    FILE_NOT_READY = "FILE_NOT_READY"
+    TRANSIENT = "TRANSIENT"
+    INVALID_MEDIA = "INVALID_MEDIA"
+    PERMISSION_ERROR = "PERMISSION_ERROR"
+    IO_ERROR = "IO_ERROR"
+    FFPROBE_NOT_FOUND = "FFPROBE_NOT_FOUND"
+    UNKNOWN_FFPROBE_ERROR = "UNKNOWN_FFPROBE_ERROR"
+
+
+class FFprobeError(RuntimeError):
+    """A duration-read failure with stable, sanitized diagnostics."""
+
+    def __init__(
+        self,
+        category: FFprobeErrorCategory,
+        path: str | Path,
+        *,
+        reason: str,
+        exists: bool,
+        size: int | None,
+        exit_code: int | None = None,
+        stderr: str = "",
+        attempt: int = 1,
+    ) -> None:
+        self.category = category
+        self.path = str(path)
+        self.reason = reason
+        self.exists = exists
+        self.size = size
+        self.exit_code = exit_code
+        self.stderr = stderr
+        self.attempt = attempt
+        detail = stderr or reason
+        super().__init__(
+            "Cannot read media metadata: "
+            f"category={category.value} path={self.path!r} exists={exists} "
+            f"size={size} ffprobe_exit={exit_code} attempt={attempt} "
+            f"reason={detail!r}"
+        )
+
+
+_FFPROBE_TRANSIENT_MARKERS = (
+    "resource temporarily unavailable",
+    "temporarily unavailable",
+    "sharing violation",
+    "being used by another process",
+    "device or resource busy",
+    "text file busy",
+)
+_FFPROBE_INVALID_MEDIA_MARKERS = (
+    "invalid data found when processing input",
+    "moov atom not found",
+    "invalid container",
+    "could not find codec parameters",
+)
+_FFPROBE_NOT_FOUND_MARKERS = (
+    "no such file or directory",
+    "file not found",
+)
+_FFPROBE_PERMISSION_MARKERS = ("permission denied", "access is denied")
+_FFPROBE_IO_MARKERS = ("input/output error", "i/o error")
+_FFPROBE_SECRET_RE = re.compile(
+    r"(?i)\b(authorization|cookie|sapisidhash|sessiontoken|token)\b"
+    r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+
+
+def _sanitize_ffprobe_text(value, *, limit: int = FFPROBE_DIAGNOSTIC_LIMIT) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    compact = " ".join(str(value or "").split())
+    compact = _FFPROBE_SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", compact)
+    if len(compact) > limit:
+        return compact[:limit] + "..."
+    return compact
+
+
+def _classify_ffprobe_stderr(stderr: str) -> FFprobeErrorCategory:
+    lowered = stderr.lower()
+    if any(marker in lowered for marker in _FFPROBE_NOT_FOUND_MARKERS):
+        return FFprobeErrorCategory.FILE_NOT_FOUND
+    if any(marker in lowered for marker in _FFPROBE_PERMISSION_MARKERS):
+        return FFprobeErrorCategory.PERMISSION_ERROR
+    if any(marker in lowered for marker in _FFPROBE_TRANSIENT_MARKERS):
+        return FFprobeErrorCategory.TRANSIENT
+    if any(marker in lowered for marker in _FFPROBE_INVALID_MEDIA_MARKERS):
+        return FFprobeErrorCategory.INVALID_MEDIA
+    if any(marker in lowered for marker in _FFPROBE_IO_MARKERS):
+        return FFprobeErrorCategory.IO_ERROR
+    return FFprobeErrorCategory.UNKNOWN_FFPROBE_ERROR
+
+
+def _classify_filesystem_error(exc: OSError) -> FFprobeErrorCategory:
+    if isinstance(exc, PermissionError):
+        return FFprobeErrorCategory.PERMISSION_ERROR
+    if exc.errno in {errno.EAGAIN, errno.EBUSY, errno.ETXTBSY}:
+        return FFprobeErrorCategory.TRANSIENT
+    return FFprobeErrorCategory.IO_ERROR
+
+
+def _logged_ffprobe_error(error: FFprobeError) -> FFprobeError:
+    logger.error("{}", error)
+    return error
+
+
+def _raise_or_retry_ffprobe(
+    error: FFprobeError,
+    *,
+    attempt: int,
+    max_attempts: int,
+    retry_delay: float,
+    sleep,
+) -> None:
+    retryable = error.category in {
+        FFprobeErrorCategory.FILE_NOT_READY,
+        FFprobeErrorCategory.TRANSIENT,
+    }
+    if retryable and attempt < max_attempts:
+        logger.warning(
+            "FFprobe temporary failure: category={} path={} exists={} size={} "
+            "ffprobe_exit={} attempt={}/{} reason={}",
+            error.category.value,
+            error.path,
+            error.exists,
+            error.size,
+            error.exit_code,
+            attempt,
+            max_attempts,
+            error.stderr or error.reason,
+        )
+        sleep(max(0.0, retry_delay))
+        return
+    logger.error("{}", error)
+    raise error
+
+
+def get_video_duration(
+    input_file,
+    *,
+    max_attempts: int = FFPROBE_MAX_ATTEMPTS,
+    retry_delay: float = FFPROBE_RETRY_DELAY_SECONDS,
+    sleep=wait_interruptibly,
+) -> float:
+    """Return a positive duration or raise :class:`FFprobeError`.
+
+    Only zero-length/not-ready files and explicitly temporary ffprobe errors
+    are retried. Permanent or unknown failures fail immediately.
+    """
+    path = Path(input_file)
+    attempts = max(1, int(max_attempts))
+
+    for attempt in range(1, attempts + 1):
+        try:
+            file_stat = path.stat()
+        except FileNotFoundError as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.FILE_NOT_FOUND,
+                path,
+                reason="path does not exist",
+                exists=False,
+                size=None,
+                attempt=attempt,
+            )) from exc
+        except OSError as exc:
+            error = FFprobeError(
+                _classify_filesystem_error(exc),
+                path,
+                reason=_sanitize_ffprobe_text(exc),
+                exists=True,
+                size=None,
+                attempt=attempt,
+            )
+            _raise_or_retry_ffprobe(
+                error,
+                attempt=attempt,
+                max_attempts=attempts,
+                retry_delay=retry_delay,
+                sleep=sleep,
+            )
+            continue
+
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.FILE_NOT_FOUND,
+                path,
+                reason="path is not a regular file",
+                exists=True,
+                size=None,
+                attempt=attempt,
+            ))
+
+        size = file_stat.st_size
+        if size <= 0:
+            error = FFprobeError(
+                FFprobeErrorCategory.FILE_NOT_READY,
+                path,
+                reason="file size is zero",
+                exists=True,
+                size=size,
+                attempt=attempt,
+            )
+            _raise_or_retry_ffprobe(
+                error,
+                attempt=attempt,
+                max_attempts=attempts,
+                retry_delay=retry_delay,
+                sleep=sleep,
+            )
+            continue
+
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ]
+        try:
+            completed = run_owned_process(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except TaskStopped:
+            raise
+        except FileNotFoundError as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.FFPROBE_NOT_FOUND,
+                path,
+                reason="ffprobe executable was not found",
+                exists=True,
+                size=size,
+                attempt=attempt,
+            )) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = _sanitize_ffprobe_text(exc.stderr)
+            error = FFprobeError(
+                _classify_ffprobe_stderr(stderr),
+                path,
+                reason="ffprobe exited with an error",
+                exists=True,
+                size=size,
+                exit_code=exc.returncode,
+                stderr=stderr,
+                attempt=attempt,
+            )
+            _raise_or_retry_ffprobe(
+                error,
+                attempt=attempt,
+                max_attempts=attempts,
+                retry_delay=retry_delay,
+                sleep=sleep,
+            )
+            continue
+        except PermissionError as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.PERMISSION_ERROR,
+                path,
+                reason=_sanitize_ffprobe_text(exc),
+                exists=True,
+                size=size,
+                attempt=attempt,
+            )) from exc
+        except OSError as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.IO_ERROR,
+                path,
+                reason=_sanitize_ffprobe_text(exc),
+                exists=True,
+                size=size,
+                attempt=attempt,
+            )) from exc
+
+        try:
+            result = completed.stdout
+            if isinstance(result, bytes):
+                result = result.decode("utf-8", errors="replace")
+            data = json.loads(result)
+        except json.JSONDecodeError as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.UNKNOWN_FFPROBE_ERROR,
+                path,
+                reason=f"ffprobe returned invalid JSON: {_sanitize_ffprobe_text(exc)}",
+                exists=True,
+                size=size,
+                exit_code=completed.returncode,
+                attempt=attempt,
+            )) from exc
+        try:
+            duration = float(data["format"]["duration"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.INVALID_MEDIA,
+                path,
+                reason=f"ffprobe did not return a valid duration: {_sanitize_ffprobe_text(exc)}",
+                exists=True,
+                size=size,
+                exit_code=completed.returncode,
+                attempt=attempt,
+            )) from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise _logged_ffprobe_error(FFprobeError(
+                FFprobeErrorCategory.INVALID_MEDIA,
+                path,
+                reason=f"ffprobe returned non-positive duration {duration!r}",
+                exists=True,
+                size=size,
+                exit_code=completed.returncode,
+                attempt=attempt,
+            ))
+        return duration
+
+    raise AssertionError("unreachable ffprobe retry state")
+
+
+def calculate_total_seconds(iso_duration):
+    if not iso_duration:
+        logger.error("Video chưa được public!!!")
+        return 0
+    pattern = re.compile(r"P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)")
+    match = pattern.match(iso_duration)
+    if not match:
+        return "Invalid ISO 8601 duration format"
+    hours = int(match.group(1)) if match.group(1) else 0
+    minutes = int(match.group(2)) if match.group(2) else 0
+    seconds = int(match.group(3)) if match.group(3) else 0
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    return total_seconds
+
+
+pass
+pass
+def multiply_audio(input_file: str, output_file: str, times: int, extra_minutes=0, video_duration_seconds=None) -> None:
+    """
+    Super-fast version: no filters, no temp files.
+    - Computes total target duration.
+    - Uses -stream_loop to repeat input and -t to trim exactly.
+    - Copies compatible MP3 audio without re-encoding; otherwise encodes MP3.
+    - If video_duration_seconds is provided, trims the final audio to match video duration.
+    """
+    if times < 1:
+        raise ValueError("Times must be >= 1")
+    if extra_minutes < 0:
+        raise ValueError("Extra minutes must be >= 0")
+    src = input_file
+    dst = output_file
+    dur = get_video_duration(src)
+    if dur <= 0:
+        raise RuntimeError("Input duration is zero or could not be read.")
+    extra_seconds = extra_minutes * 60
+    if video_duration_seconds is not None and video_duration_seconds > 0:
+        total_seconds = video_duration_seconds
+    else:
+        total_seconds = times * (dur + extra_seconds)
+    needed_copies = math.ceil(total_seconds / dur)
+    stream_loop = max(0, needed_copies - 1)
+    base_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y", "-stream_loop", str(stream_loop), "-i", src, "-t", f"{total_seconds:.6f}"]
+    # Match TV Automation's copy-first preparation. The MP3 muxer validates
+    # the source codec; AAC/OPUS/etc. fall back to encoding a real MP3.
+    if Path(dst).suffix.casefold() == ".mp3":
+        cmd_copy = base_cmd + ["-map", "0:a:0", "-vn", "-c:a", "copy", dst]
+        try:
+            run_owned_process(cmd_copy, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            return
+        except subprocess.CalledProcessError:
+            logger.debug("Audio cannot be copied into MP3; encoding the selected audio stream")
+    cmd_reencode = base_cmd + ["-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "2", dst]
+    run_owned_process(cmd_reencode, check=True)
+
+
+VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".webm", ".mp4"}
+AUDIO_EXTENSIONS = {
+    ".aac",
+    ".ac3",
+    ".aif",
+    ".aiff",
+    ".alac",
+    ".amr",
+    ".ape",
+    ".caf",
+    ".eac3",
+    ".flac",
+    ".m4a",
+    ".mka",
+    ".mp2",
+    ".mp3",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".wma",
+}
+# The manual Audio Path field historically accepted MP4 files as audio sources.
+# Keep those media containers compatible while sharing all real audio formats
+# with the folder based workflows.
+AUDIO_INPUT_EXTENSIONS = AUDIO_EXTENSIONS | {".m4v", ".mov", ".mp4", ".webm"}
+
+_QSV_PROBE_LOCK = threading.Lock()
+_QSV_AVAILABLE: bool | None = None
+DEFAULT_VIDEO_BITRATE = "4M"
+DEFAULT_VIDEO_MAXRATE = "5M"
+DEFAULT_VIDEO_BUFSIZE = "8M"
+
+
+def _video_quality_args(*, qsv: bool, video_bitrate: str | None) -> list[str]:
+    """Return balanced VBR settings while preserving an explicit override."""
+    del qsv  # Both encoders use the same bounded average bitrate.
+    if video_bitrate:
+        return ["-b:v", video_bitrate]
+    return [
+        "-b:v", DEFAULT_VIDEO_BITRATE,
+        "-maxrate", DEFAULT_VIDEO_MAXRATE,
+        "-bufsize", DEFAULT_VIDEO_BUFSIZE,
+    ]
+
+
+def has_working_h264_qsv() -> bool:
+    """Return whether this machine can actually initialize Intel QSV encoding.
+
+    Listing ``h264_qsv`` is not enough: the FFmpeg build may contain the encoder
+    while the machine has no compatible GPU/driver.  Probe one tiny in-memory
+    frame once per application run and cache the result.
+    """
+    global _QSV_AVAILABLE
+    if _QSV_AVAILABLE is not None:
+        return _QSV_AVAILABLE
+
+    with _QSV_PROBE_LOCK:
+        if _QSV_AVAILABLE is not None:
+            return _QSV_AVAILABLE
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=size=64x64:rate=1",
+            "-frames:v", "1", "-vf", "format=nv12",
+            "-c:v", "h264_qsv", "-f", "null", os.devnull,
+        ]
+        try:
+            run_owned_process(
+                command,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            _QSV_AVAILABLE = True
+            logger.info("Intel QSV H.264 encoder is available")
+        except (OSError, subprocess.SubprocessError):
+            _QSV_AVAILABLE = False
+            logger.info("Intel QSV unavailable; using CPU libx264")
+        return _QSV_AVAILABLE
+
+
+def list_media_files(folder: str, extensions: set[str]) -> list[Path]:
+    """Return sorted media files (by name) directly inside `folder`."""
+    folder_path = Path(normalize_path(folder))
+    if not folder_path.exists() or not folder_path.is_dir():
+        return []
+    files = [
+        p
+        for p in folder_path.iterdir()
+        if p.is_file() and p.suffix.lower() in extensions
+    ]
+    return sorted(files, key=lambda p: p.name.lower())
+
+
+pass
+pass
+def build_intermittent_audio(music_file: str, audio_out: str, play_sec: float = 3.0, mute_sec: float = 7.0) -> float:
+    """
+    Build a gated (intermittent) audio track spanning the whole music length.
+
+    The music is audible for `play_sec` seconds, silent for `mute_sec` seconds,
+    repeating for the whole music length; the final `play_sec` seconds are
+    always audible.
+
+    Returns the music duration in seconds (dùng làm thời lượng đích khi mux —
+    video gốc sẽ được loop cho bằng thời lượng này).
+    """
+    dur = get_video_duration(music_file)
+    if not dur or dur <= 0:
+        raise RuntimeError(f"Could not read music duration: {music_file}")
+    cycle = play_sec + mute_sec
+    tail_start = max(0.0, dur - play_sec)
+    volume_expr = f"if(lt(mod(t,{cycle}),{play_sec}),1,if(gte(t,{tail_start}),1,0))"
+    filter_complex = f"[0:a]volume=volume='{volume_expr}':eval=frame[aud]"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y", "-stream_loop", "-1", "-i", music_file,
+        "-filter_complex", filter_complex, "-map", "[aud]", "-t", f"{dur:.6f}",
+        "-c:a", "aac", "-b:a", "192k", audio_out,
+    ]
+    run_owned_process(cmd, check=True)
+    return dur
+
+
+pass
+pass
+pass
+def mux_audio_into_video(video_file: str, audio_file: str, video_out: str, duration: float | None = None, video_bitrate: str | None = None, overlay_png: str | None = None, *, loop_transition: bool = False) -> None:
+    """
+    Nén clip gốc 1 lần rồi loop cho bằng `duration` và ghép `audio_file`.
+
+    Vì clip gốc được lặp lại để phủ 2-3 tiếng, dung lượng file (do đó thời gian
+    upload) tỉ lệ với bitrate của clip. Ở đây clip ngắn được nén xuống
+    `video_bitrate` (giữ nguyên độ phân giải) MỘT lần — rất nhanh vì clip ngắn —
+    sau đó loop-copy nên file dài 2-3 tiếng vẫn nhỏ và tạo nhanh.
+
+    Audio thay thế hoàn toàn tiếng gốc.
+    Khi bật loop_transition, chỉ Cross Dissolve giữa các lần lặp;
+    không fade đen ở đầu hoặc cuối video.
+    """
+    dur = duration if duration is not None else get_video_duration(audio_file)
+    if dur <= 0:
+        raise RuntimeError(f"Could not determine target duration for {video_file}")
+    use_overlay = bool(overlay_png and Path(normalize_path(overlay_png)).is_file())
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
+        compressed_clip = tf.name
+    run_context = current_run_context()
+    if run_context is not None:
+        run_context.register_cleanup_path(compressed_clip)
+    try:
+        def _compress_command(*, qsv: bool) -> list[str]:
+            command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y", "-i", video_file]
+            if use_overlay:
+                command += ["-loop", "1", "-i", normalize_path(overlay_png)]
+                command += ["-filter_complex", "[1:v][0:v]scale2ref[ovl][base];[base][ovl]overlay=0:0[outv]", "-map", "[outv]", "-shortest"]
+            if qsv:
+                command += [
+                    "-an", "-c:v", "h264_qsv", "-preset", "veryfast",
+                    *_video_quality_args(qsv=True, video_bitrate=video_bitrate),
+                    "-pix_fmt", "nv12", compressed_clip,
+                ]
+            else:
+                command += [
+                    "-an", "-c:v", "libx264", "-preset", "veryfast",
+                    *_video_quality_args(qsv=False, video_bitrate=video_bitrate),
+                    "-pix_fmt", "yuv420p", compressed_clip,
+                ]
+            return command
+
+        use_qsv = has_working_h264_qsv()
+        try:
+            run_owned_process(_compress_command(qsv=use_qsv), check=True)
+        except subprocess.CalledProcessError:
+            if not use_qsv:
+                raise
+            logger.warning("QSV encode failed for {}; retrying with CPU libx264", video_file)
+            run_owned_process(_compress_command(qsv=False), check=True)
+        video_input = ["-stream_loop", "-1", "-i", compressed_clip]
+        base_cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y", *video_input,
+            "-i", audio_file, "-map", "0:v:0", "-map", "1:a:0", "-t", f"{dur:.6f}",
+        ]
+        try:
+            run_owned_process(
+                base_cmd
+                + ["-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart", video_out],
+                check=True,
+            )
+            return
+        except subprocess.CalledProcessError:
+            pass
+        run_owned_process(
+            base_cmd
+            + [
+                "-c:v", "libx264", "-preset", "veryfast",
+                *_video_quality_args(qsv=False, video_bitrate=video_bitrate),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart", video_out,
+            ],
+            check=True,
+        )
+    finally:
+        try:
+            if Path(compressed_clip).exists():
+                Path(compressed_clip).unlink()
+        except Exception as exc:
+            logger.warning(f"Không xóa được clip tạm {compressed_clip}: {exc}")
+
+
+pass
+def get_channels_info(channel_id: str | None = None) -> list[ChannelInfo] | ChannelInfo | None:
+    """
+    Retrieve channel info from SQLite database.
+
+    Args:
+        channel_id: Specific channel ID to fetch. If None, fetch all channels.
+
+    Returns:
+        - list[ChannelInfo]: when channel_id is None (may be empty)
+        - ChannelInfo: for a specific channel_id
+        - None: if the specific channel doesn't exist
+    """
+    from src.channel_store import channel_store
+    channel_store.init_db()
+    if channel_id:
+        rec = channel_store.get_channel(channel_id)
+        if not rec:
+            logger.error("Channel ID '%s' not found in database", channel_id)
+            return None
+        return ChannelInfo(
+            id=rec["id"], name=rec.get("name", ""), img_src=rec.get("img_src", ""),
+            sapisidhash=rec.get("sapisidhash", ""), delegated_session_id=rec.get("delegated_session_id", ""),
+            cookies=rec.get("cookies", []), cookies_expires_at=rec.get("cookies_expires_at"), role=rec.get("role", ""),
+            challenge=rec.get("challenge", ""), botguardResponse=rec.get("botguardResponse", ""),
+            overlay_png=rec.get("overlay_png", ""),
+            owner_email=rec.get("owner_email", ""),
+            studio_context=rec.get("studio_context", {}),
+        )
+    rows = channel_store.list_channels()
+    channels = []
+    for r in rows:
+        if not r.get("id"):
+            continue
+        channels.append(ChannelInfo(
+            id=r["id"], name=r.get("name", ""), img_src=r.get("img_src", ""),
+            sapisidhash=r.get("sapisidhash", ""), delegated_session_id=r.get("delegated_session_id", ""),
+            cookies=r.get("cookies", []), cookies_expires_at=r.get("cookies_expires_at"), role=r.get("role", ""),
+            challenge=r.get("challenge", ""), botguardResponse=r.get("botguardResponse", ""),
+            overlay_png=r.get("overlay_png", ""),
+            owner_email=r.get("owner_email", ""),
+            studio_context=r.get("studio_context", {}),
+        ))
+    logger.info(f"Total channels loaded: {len(channels)}")
+    return channels
+
+
+def _bundled_chromedriver() -> Path | None:
+    if getattr(sys, "frozen", False):
+        candidate = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "tools" / "chromedriver.exe"
+    else:
+        candidate = Path(__file__).resolve().parent.parent / "vendor" / "chromedriver" / "chromedriver.exe"
+    return candidate if candidate.is_file() else None
+
+
+def _chrome_major_version() -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        locations = (
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Google\Chrome\BLBeacon"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+        )
+        for hive, key_path in locations:
+            try:
+                with winreg.OpenKey(hive, key_path) as key:
+                    version, _ = winreg.QueryValueEx(key, "version")
+                return int(str(version).split(".", 1)[0])
+            except OSError:
+                continue
+    except (ImportError, ValueError):
+        pass
+    return None
+
+
+def _driver_major_version(driver_path: Path) -> int | None:
+    try:
+        output = run_owned_process(
+            [str(driver_path), "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).stdout
+        match = re.search(r"ChromeDriver\s+(\d+)", output)
+        return int(match.group(1)) if match else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+pass
+def create_driver(enable_performance_log: bool = False, *, start_offscreen: bool = False, user_data_dir: str | Path | None = None):
+    options = webdriver.ChromeOptions()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-notifications")
+    if user_data_dir is not None:
+        profile_dir = Path(user_data_dir).resolve()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir}")
+    if start_offscreen:
+        options.add_argument("--no-first-run")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--window-position=-32000,-32000")
+    if enable_performance_log:
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    bundled_driver = _bundled_chromedriver()
+    chrome_major = _chrome_major_version()
+    driver_major = _driver_major_version(bundled_driver) if bundled_driver else None
+    if bundled_driver and (chrome_major is None or driver_major == chrome_major):
+        try:
+            logger.info("Using bundled ChromeDriver {}", bundled_driver)
+            return register_driver(
+                webdriver.Chrome(
+                    service=Service(str(bundled_driver)),
+                    options=options,
+                )
+            )
+        except TaskStopped:
+            raise
+        except Exception as exc:
+            logger.warning("Bundled ChromeDriver failed; trying managed driver: {}", exc)
+    elif bundled_driver:
+        logger.warning(
+            "Bundled ChromeDriver major {} does not match Chrome {}; downloading a compatible driver.",
+            driver_major,
+            chrome_major,
+        )
+    try:
+        return register_driver(
+            webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options,
+            )
+        )
+    except TaskStopped:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            "Không thể khởi động ChromeDriver. Hãy cập nhật Chrome hoặc kết nối "
+            "Internet để ứng dụng tải driver tương thích."
+        ) from exc
+
+
+def normalize_path(path_text: str) -> str:
+    """Trim pasted whitespace while preserving the exact filesystem Unicode."""
+    # Emoji joiners/tags and combining accents are part of the actual filename.
+    # Removing them or applying NFC can point to a different file on Windows.
+    return path_text.strip()
+
+
+def validate_path_text(path_text: str) -> tuple[(bool, str | None)]:
+    """Validate an absolute file path for allowed audio types."""
+    if not path_text:
+        return False, "Vui lòng nhập đường dẫn tuyệt đối tới file âm thanh"
+    path_text = normalize_path(path_text)
+    p = Path(path_text)
+    if not p.exists() or not p.is_file():
+        return False, f"File không tồn tại hoặc không phải là file hợp lệ: {path_text}"
+    if p.suffix.lower() not in AUDIO_INPUT_EXTENSIONS:
+        allowed = ", ".join(sorted(AUDIO_INPUT_EXTENSIONS))
+        return False, f"Định dạng không hợp lệ. Chỉ chấp nhận {allowed}"
+    return True, None
+
+
+pass
+def get_request_payload_from_performance_log(driver, url_substring: str, timeout: float = 15.0, poll_interval: float = 0.5):
+    """
+    Đọc performance log của Chrome, tìm request có URL chứa `url_substring`,
+    trả về payload (postData) của request đó.
+
+    Returns:
+        - str: postData nếu request có body
+        - None: nếu request match nhưng không có body (GET/empty)
+    Raises:
+        - TimeoutError: nếu hết timeout vẫn không thấy request
+    """
+    deadline = time.monotonic() + timeout
+    run_context = current_run_context()
+    while time.monotonic() < deadline:
+        if run_context is not None:
+            run_context.checkpoint()
+        for entry in driver.get_log("performance"):
+            try:
+                msg = json.loads(entry["message"])
+                method = msg.get("message", {}).get("method")
+                if method != "Network.requestWillBeSent":
+                    continue
+                params = msg.get("message", {}).get("params", {})
+                request = params.get("request", {})
+                if url_substring not in request.get("url", ""):
+                    continue
+                return request.get("postData")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+        if run_context is None:
+            time.sleep(poll_interval)
+        else:
+            run_context.wait(poll_interval)
+    raise TimeoutError(f"Không tìm thấy request chứa '{url_substring}' sau {timeout}s")

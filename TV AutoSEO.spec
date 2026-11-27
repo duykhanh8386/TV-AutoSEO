@@ -1,0 +1,143 @@
+import os
+import shutil
+from pathlib import Path
+
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    copy_metadata,
+)
+
+
+project_root = Path(SPECPATH).resolve()
+media_bin = Path(
+    os.environ.get("TVAUTOSEO_FFMPEG_DIR")
+    or os.environ.get("TVAUTOMATION_FFMPEG_DIR")
+    or str(project_root / "vendor" / "ffmpeg" / "bin")
+)
+chromedriver_bin = Path(
+    os.environ.get("TVAUTOSEO_CHROMEDRIVER")
+    or os.environ.get("TVAUTOMATION_CHROMEDRIVER")
+    or str(project_root / "vendor" / "chromedriver" / "chromedriver.exe")
+)
+node_executable = (
+    os.environ.get("TVAUTOSEO_NODE")
+    or os.environ.get("TVAUTOMATION_NODE")
+    or shutil.which("node")
+)
+gpt_backend = project_root / "gpt_backend"
+
+
+def collect_media_binaries():
+    """Collect the project-vendored static FFmpeg tools."""
+    roots = [media_bin / "ffmpeg.exe", media_bin / "ffprobe.exe"]
+    missing = [str(path) for path in roots if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing media tools; expected workspace-local files: " + ", ".join(missing)
+        )
+
+    return [(str(path), "tools/ffmpeg") for path in roots]
+
+
+def collect_chromedriver():
+    if not chromedriver_bin.is_file():
+        raise FileNotFoundError(f"Missing bundled ChromeDriver: {chromedriver_bin}")
+    return [(str(chromedriver_bin), "tools")]
+
+
+def collect_bundled_fonts():
+    """Bundle local Inter font files for offline desktop UI rendering."""
+    fonts_dir = project_root / "assets" / "fonts"
+    if not fonts_dir.is_dir():
+        return []
+    return [(str(path), "assets/fonts") for path in sorted(fonts_dir.glob("*.woff2"))]
+
+
+def collect_node():
+    if not node_executable or not Path(node_executable).is_file():
+        raise FileNotFoundError("Node.js is required to package GPT image generation.")
+    if not (gpt_backend / "node_modules" / "puppeteer-core").is_dir():
+        raise FileNotFoundError("Run npm ci in gpt_backend before building.")
+    return [(node_executable, "tools/node")]
+
+
+datas = [
+    (str(project_root / "VERSION"), "."),
+    (str(project_root / "assets" / "logo.png"), "assets"),
+    *collect_bundled_fonts(),
+    (str(project_root / "vendor" / "ffmpeg" / "LICENSE"), "licenses/ffmpeg"),
+    (str(project_root / "vendor" / "ffmpeg" / "README.txt"), "licenses/ffmpeg"),
+    (str(project_root / "vendor" / "chromedriver" / "LICENSE.chromedriver"), "licenses/chromedriver"),
+    (str(project_root / "vendor" / "chromedriver" / "THIRD_PARTY_NOTICES.chromedriver"), "licenses/chromedriver"),
+    (str(gpt_backend / "worker.js"), "gpt_backend"),
+    (str(gpt_backend / "package.json"), "gpt_backend"),
+    (str(gpt_backend / "src"), "gpt_backend/src"),
+    (str(gpt_backend / "node_modules"), "gpt_backend/node_modules"),
+    *collect_data_files("nicegui"),
+    *collect_data_files("certifi"),
+    *copy_metadata("nicegui"),
+]
+
+hiddenimports = [
+    "engineio.async_drivers.asgi",
+    "uvicorn.lifespan.on",
+    "uvicorn.loops.auto",
+    "uvicorn.loops.asyncio",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.http.httptools_impl",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.protocols.websockets.websockets_impl",
+    "uvicorn.protocols.websockets.websockets_sansio_impl",
+    "uvicorn.protocols.websockets.wsproto_impl",
+]
+
+a = Analysis(
+    [str(project_root / "app.py")],
+    pathex=[str(project_root)],
+    binaries=(
+        collect_media_binaries()
+        + collect_chromedriver()
+        + collect_node()
+    ),
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[str(project_root / "build_hooks" / "runtime_path.py")],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="TV AutoSEO",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=str(project_root / "assets" / "logo.ico"),
+    contents_directory="_internal",
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="TV AutoSEO",
+)
