@@ -47,14 +47,52 @@ EDITOR = '''
 <ytcp-button id="save-button" aria-disabled="true"><button disabled>Done</button></ytcp-button>
 </div></ytcp-video-visibility-edit-popup>
 <ytcp-uploads-dialog style="display:none;position:fixed;inset:0;background:white;z-index:900">
- <button id="step-badge-0" test-id="DETAILS">Details</button>
- <button id="step-badge-3" test-id="REVIEW">Sichtbarkeit</button>
+ <ytcp-stepper id="ytcp-uploads-dialog-stepper">
+  <button id="step-badge-0" test-id="DETAILS" aria-selected="true" active>Details</button>
+  <button id="step-badge-1" test-id="RIGHTS_MANAGEMENT" style="display:none">Quản lý quyền</button>
+  <button id="step-badge-2" test-id="MONETIZATION" style="display:none">Kiếm tiền</button>
+  <button id="step-badge-content" test-id="CONTENT_RATINGS" style="display:none">Mức độ phù hợp</button>
+  <button id="step-badge-elements" test-id="VIDEO_ELEMENTS" style="display:none">Video elements</button>
+  <button id="step-badge-checks" test-id="CHECKS" style="display:none">Checks</button>
+  <button id="step-badge-3" test-id="REVIEW">Sichtbarkeit</button>
+ </ytcp-stepper>
  <div id="draft-details-panel">
   <div id="title-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>
   <div id="description-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>
   <ytcp-thumbnail-editor><input type="file" accept="image/jpeg" hidden></ytcp-thumbnail-editor>
   <ytcp-video-metadata-playlists><ytcp-dropdown-trigger role="button" style="display:block">Playlists</ytcp-dropdown-trigger></ytcp-video-metadata-playlists>
  </div>
+ <ytcms-video-rights-management-settings style="display:none">
+  <ytcms-policy-select class="upload-policy-select">
+   <ytcp-dropdown-trigger role="button" style="display:block"><span class="dropdown-trigger-text">Track in all countries</span></ytcp-dropdown-trigger>
+  </ytcms-policy-select>
+  <ytcms-asset-ownership-territory>
+   <tp-yt-paper-radio-group id="ownership-group">
+    <tp-yt-paper-radio-button id="global-radio-button" name="GLOBAL" role="radio" aria-checked="false" style="display:block">Toàn cầu</tp-yt-paper-radio-button>
+    <tp-yt-paper-radio-button id="specific-radio-button" name="SPECIFIC" role="radio" aria-checked="true" style="display:block">Các lãnh thổ cụ thể</tp-yt-paper-radio-button>
+   </tp-yt-paper-radio-group>
+  </ytcms-asset-ownership-territory>
+  <div id="metadata-music-video-song-input"><textarea></textarea></div>
+  <ytcms-identified-people-editor>
+   <ytcp-chip-bar><div class="chip-and-bar"><input id="text-input" type="text"></div></ytcp-chip-bar>
+  </ytcms-identified-people-editor>
+ </ytcms-video-rights-management-settings>
+ <ytcp-uploads-monetization style="display:none">
+  <ytpp-video-monetization-basics>
+   <ytcp-dropdown-trigger id="monetization-trigger" role="button" style="display:none"><span class="dropdown-trigger-text">Chọn</span></ytcp-dropdown-trigger>
+   <ytpp-ad-options-settings style="display:none">Hiện quảng cáo trong video của tôi</ytpp-ad-options-settings>
+  </ytpp-video-monetization-basics>
+ </ytcp-uploads-monetization>
+ <ytcp-uploads-content-ratings style="display:none">
+  <ytpp-self-certification-questionnaire>
+   <ytcp-banner><ytcp-button id="action-1"><button>Tìm hiểu thêm</button></ytcp-button><ytcp-button id="action-2"><button>Bỏ qua</button></ytcp-button></ytcp-banner>
+   <ytpp-self-certification-question><ytcp-checkbox-lit class="question-box"><div role="checkbox" aria-checked="false">Có nội dung nhạy cảm</div></ytcp-checkbox-lit></ytpp-self-certification-question>
+   <ytcp-checkbox-lit class="all-none-checkbox" style="display:block"><div id="checkbox" role="checkbox" aria-checked="false">None of the above</div></ytcp-checkbox-lit>
+   <ytcp-button id="submit-questionnaire-button"><ytcp-button-shape><button>Submit rating</button></ytcp-button-shape></ytcp-button>
+  </ytpp-self-certification-questionnaire>
+ </ytcp-uploads-content-ratings>
+ <div id="draft-elements-panel" style="display:none">Video elements</div>
+ <div id="draft-checks-panel" style="display:none">Checks ok</div>
  <div id="draft-review-panel" style="display:none">
   <ytcp-video-visibility-select first-container-style="selected" second-container-style="">
    <div id="first-container"><button name="PUBLIC">Public now</button></div>
@@ -67,8 +105,29 @@ EDITOR = '''
    </ytcp-datetime-picker></ytcp-visibility-scheduler></div>
   </ytcp-video-visibility-select>
  </div>
+ <ytcp-button id="next-button" style="display:none" aria-disabled="false"><ytcp-button-shape><button>Tiếp</button></ytcp-button-shape></ytcp-button>
  <ytcp-button id="done-button" aria-disabled="false"><ytcp-button-shape><button>Veröffentlichungszeitpunkt festlegen</button></ytcp-button-shape></ytcp-button>
 </ytcp-uploads-dialog>
+<tp-yt-paper-dialog aria-label="policy-dialog" style="display:none;position:fixed;inset:12%;background:white;z-index:2204">
+ <input id="policy-filter-input" type="text">
+ <div id="items" role="listbox">
+  <tp-yt-paper-item id="item-0" role="option" aria-selected="false" style="display:block"><span class="title">Block in all countries</span></tp-yt-paper-item>
+  <tp-yt-paper-item id="item-9" role="option" aria-selected="false" style="display:block"><span class="title">Monetize in all countries</span></tp-yt-paper-item>
+  <tp-yt-paper-item id="item-10" role="option" aria-selected="true" selected style="display:block"><span class="title">Track in all countries</span></tp-yt-paper-item>
+ </div>
+ <ytcp-button id="apply-policy"><ytcp-button-shape><button>Áp dụng</button></ytcp-button-shape></ytcp-button>
+</tp-yt-paper-dialog>
+<ytcp-video-monetization-edit-dialog style="display:none;position:fixed;inset:20%;background:white;z-index:2204">
+ <tp-yt-paper-radio-group>
+  <tp-yt-paper-radio-button id="radio-on" name="ON" role="radio" aria-checked="false" style="display:block">Bật</tp-yt-paper-radio-button>
+  <tp-yt-paper-radio-button id="radio-off" name="OFF" role="radio" aria-checked="true" style="display:block">Tắt</tp-yt-paper-radio-button>
+ </tp-yt-paper-radio-group>
+ <ytcp-button id="save-button"><ytcp-button-shape><button>Xong</button></ytcp-button-shape></ytcp-button>
+</ytcp-video-monetization-edit-dialog>
+<ytcp-dialog aria-labelledby="cms-identified-people-edit-dialog-title" style="display:none;position:fixed;inset:22%;background:white;z-index:2205">
+ <div id="name-input"><textarea></textarea></div>
+ <ytcp-button id="save"><ytcp-button-shape><button>Lưu</button></ytcp-button-shape></ytcp-button>
+</ytcp-dialog>
 <ytcp-date-picker><div class="date-panel" style="display:none;position:fixed;inset:20%;background:white;z-index:1002"><input type="text"></div></ytcp-date-picker>
 <ytcp-text-menu><div class="timezone-panel" style="display:none;position:fixed;inset:20%;background:white;z-index:1002">
 <tp-yt-paper-item test-id="0" style="display:block">(GMT+0700) Local time</tp-yt-paper-item></div></ytcp-text-menu>
@@ -123,8 +182,154 @@ if(!isDraft){
  document.querySelector('ytcp-video-metadata-visibility #select-button').onclick=()=>{baselineModel=JSON.parse(JSON.stringify(scheduler.model));working=draftScheduled;render();popupEnabled(false);visibilityPanel.style.display='block';};
 } else {
  draftBanner.querySelector('#action-1 button').onclick=()=>{uploadsDialog.style.display='block';actions.push('open_draft');};
- uploadsDialog.querySelector('#step-badge-0').onclick=()=>{uploadsDialog.querySelector('#draft-details-panel').style.display='block';uploadsDialog.querySelector('#draft-review-panel').style.display='none';};
- uploadsDialog.querySelector('#step-badge-3').onclick=()=>{uploadsDialog.querySelector('#draft-details-panel').style.display='none';uploadsDialog.querySelector('#draft-review-panel').style.display='block';working=draftScheduled;render();};
+ const draftMode=config.draft_mode||'basic';
+ const stepTabs={
+  DETAILS:uploadsDialog.querySelector("[test-id='DETAILS']"),
+  RIGHTS_MANAGEMENT:uploadsDialog.querySelector("[test-id='RIGHTS_MANAGEMENT']"),
+  MONETIZATION:uploadsDialog.querySelector("[test-id='MONETIZATION']"),
+  CONTENT_RATINGS:uploadsDialog.querySelector("[test-id='CONTENT_RATINGS']"),
+  VIDEO_ELEMENTS:uploadsDialog.querySelector("[test-id='VIDEO_ELEMENTS']"),
+  CHECKS:uploadsDialog.querySelector("[test-id='CHECKS']"),
+  REVIEW:uploadsDialog.querySelector("[test-id='REVIEW']"),
+ };
+ const stepPanels={
+  DETAILS:uploadsDialog.querySelector('#draft-details-panel'),
+  RIGHTS_MANAGEMENT:uploadsDialog.querySelector('ytcms-video-rights-management-settings'),
+  MONETIZATION:uploadsDialog.querySelector('ytcp-uploads-monetization'),
+  CONTENT_RATINGS:uploadsDialog.querySelector('ytcp-uploads-content-ratings'),
+  VIDEO_ELEMENTS:uploadsDialog.querySelector('#draft-elements-panel'),
+  CHECKS:uploadsDialog.querySelector('#draft-checks-panel'),
+  REVIEW:uploadsDialog.querySelector('#draft-review-panel'),
+ };
+ const nextHost=uploadsDialog.querySelector('#next-button'), nextBtn=nextHost.querySelector('button');
+ const doneHost=uploadsDialog.querySelector('#done-button'), doneBtn=doneHost.querySelector('button');
+ let activeStep='DETAILS';
+ let policyValue='Track in all countries', ownershipGlobal=false, artistChipDone=false;
+ let monetizationOn=false, ratingsCompleted=false;
+ let visibleSteps=['DETAILS','REVIEW'];
+ if(draftMode==='monetized'){
+  visibleSteps=['DETAILS','MONETIZATION','VIDEO_ELEMENTS','CHECKS','REVIEW'];
+ } else if(draftMode==='cms'){
+  visibleSteps=['DETAILS','RIGHTS_MANAGEMENT','VIDEO_ELEMENTS','CHECKS','REVIEW'];
+ }
+ function rightsComplete(){return policyValue==='Monetize in all countries' && ownershipGlobal && artistChipDone;}
+ function draftReadyToPublish(){
+  if(draftMode==='monetized')return monetizationOn && ratingsCompleted;
+  if(draftMode==='cms')return rightsComplete() && monetizationOn;
+  return true;
+ }
+ function syncStepper(){
+  Object.entries(stepTabs).forEach(([id,tab])=>{
+   const shown=visibleSteps.includes(id);
+   tab.style.display=shown?'':'none';
+   tab.setAttribute('aria-selected',id===activeStep?'true':'false');
+   if(id===activeStep)tab.setAttribute('active','');else tab.removeAttribute('active');
+   // Deliberately shift step-badge-3 to VIDEO_ELEMENTS/CHECKS on 5-6 step wizards!
+   if(shown){
+    const idx=visibleSteps.indexOf(id);
+    if(idx===3 && id!=='REVIEW')tab.id='step-badge-3';
+    else if(id==='REVIEW')tab.id='step-badge-'+idx;
+   }
+  });
+  Object.entries(stepPanels).forEach(([id,panel])=>{panel.style.display=(id===activeStep)?'block':'none';});
+  const isReview=activeStep==='REVIEW';
+  nextHost.style.display=isReview?'none':'';
+  const nextBlocked=(activeStep==='RIGHTS_MANAGEMENT' && !rightsComplete()) || (activeStep==='CONTENT_RATINGS' && !ratingsCompleted);
+  nextBtn.disabled=nextBlocked;nextHost.setAttribute('aria-disabled',nextBlocked?'true':'false');
+  const doneDisabled=!draftReadyToPublish();
+  doneBtn.disabled=doneDisabled;doneHost.setAttribute('aria-disabled',doneDisabled?'true':'false');
+  if(activeStep==='REVIEW'){working=draftScheduled;render();}
+ }
+ function goStep(id){
+  if(!visibleSteps.includes(id))return;
+  activeStep=id;
+  syncStepper();
+ }
+ Object.entries(stepTabs).forEach(([id,tab])=>{tab.onclick=()=>goStep(id);});
+ nextBtn.onclick=()=>{
+  const idx=visibleSteps.indexOf(activeStep);
+  if(idx>=0 && idx+1<visibleSteps.length)goStep(visibleSteps[idx+1]);
+ };
+ if(draftMode==='monetized'){
+  const monTrigger=stepPanels.MONETIZATION.querySelector('#monetization-trigger');
+  const adOptions=stepPanels.MONETIZATION.querySelector('ytpp-ad-options-settings');
+  const monDialog=document.querySelector('ytcp-video-monetization-edit-dialog');
+  monTrigger.style.display='flex';
+  monTrigger.onclick=()=>{monDialog.style.display='block';actions.push('monetization_open');};
+  const rOn=monDialog.querySelector('#radio-on'), rOff=monDialog.querySelector('#radio-off');
+  rOn.onclick=()=>{rOn.setAttribute('aria-checked','true');rOff.setAttribute('aria-checked','false');actions.push('monetization_on');};
+  monDialog.querySelector('#save-button button').onclick=()=>{
+   monDialog.style.display='none';monetizationOn=true;
+   monTrigger.querySelector('.dropdown-trigger-text').innerText='Bật';
+   adOptions.style.display='block';
+   if(!visibleSteps.includes('CONTENT_RATINGS')){
+    visibleSteps=['DETAILS','MONETIZATION','CONTENT_RATINGS','VIDEO_ELEMENTS','CHECKS','REVIEW'];
+   }
+   actions.push('monetization_done');syncStepper();
+  };
+  stepPanels.CONTENT_RATINGS.querySelectorAll('ytcp-banner button').forEach(b=>{b.onclick=()=>actions.push('banner_action');});
+  const noneBox=stepPanels.CONTENT_RATINGS.querySelector('.all-none-checkbox');
+  noneBox.onclick=()=>{noneBox.querySelector('[role=checkbox]').setAttribute('aria-checked','true');actions.push('content_ratings_none');};
+  stepPanels.CONTENT_RATINGS.querySelector('#submit-questionnaire-button button').onclick=()=>{
+   if(noneBox.querySelector('[role=checkbox]').getAttribute('aria-checked')!=='true')return;
+   ratingsCompleted=true;stepTabs.CONTENT_RATINGS.setAttribute('state','completed');
+   actions.push('content_ratings_submit');syncStepper();
+  };
+ } else if(draftMode==='cms'){
+  const policyDialog=document.querySelector('tp-yt-paper-dialog[aria-label="policy-dialog"]');
+  const policyTrigger=stepPanels.RIGHTS_MANAGEMENT.querySelector('ytcms-policy-select ytcp-dropdown-trigger');
+  const filterInput=policyDialog.querySelector('#policy-filter-input');
+  let pendingPolicy=policyValue;
+  policyTrigger.onclick=()=>{policyDialog.style.display='block';filterInput.value='';actions.push('policy_open');};
+  filterInput.oninput=()=>{
+   const q=filterInput.value.trim().toLowerCase();
+   policyDialog.querySelectorAll('tp-yt-paper-item').forEach(it=>{
+    const txt=it.querySelector('.title').innerText.toLowerCase();
+    it.style.display=(!q || txt.includes(q))?'block':'none';
+   });
+   actions.push('policy_filter');
+  };
+  policyDialog.querySelectorAll('tp-yt-paper-item').forEach(it=>{
+   it.onclick=()=>{
+    policyDialog.querySelectorAll('tp-yt-paper-item').forEach(x=>{x.setAttribute('aria-selected','false');x.removeAttribute('selected');});
+    it.setAttribute('aria-selected','true');it.setAttribute('selected','');
+    pendingPolicy=it.querySelector('.title').innerText.trim();
+    actions.push('policy_select');
+   };
+  });
+  policyDialog.querySelector('#apply-policy button').onclick=()=>{
+   policyValue=pendingPolicy;
+   policyTrigger.querySelector('.dropdown-trigger-text').innerText=policyValue;
+   policyDialog.style.display='none';
+   if(policyValue==='Monetize in all countries'){
+    monetizationOn=true;
+    stepPanels.MONETIZATION.querySelector('ytpp-ad-options-settings').style.display='block';
+    if(!visibleSteps.includes('MONETIZATION')){
+     visibleSteps=['DETAILS','RIGHTS_MANAGEMENT','MONETIZATION','VIDEO_ELEMENTS','CHECKS','REVIEW'];
+    }
+   }
+   actions.push('policy_apply');syncStepper();
+  };
+  const gRadio=stepPanels.RIGHTS_MANAGEMENT.querySelector('#global-radio-button');
+  const sRadio=stepPanels.RIGHTS_MANAGEMENT.querySelector('#specific-radio-button');
+  gRadio.onclick=()=>{gRadio.setAttribute('aria-checked','true');sRadio.setAttribute('aria-checked','false');ownershipGlobal=true;actions.push('ownership_global');syncStepper();};
+  const artistBar=stepPanels.RIGHTS_MANAGEMENT.querySelector('ytcms-identified-people-editor .chip-and-bar');
+  const artistInput=artistBar.querySelector('#text-input');
+  const artistDialog=document.querySelector('ytcp-dialog[aria-labelledby="cms-identified-people-edit-dialog-title"]');
+  const artistName=artistDialog.querySelector('#name-input textarea');
+  artistInput.onkeydown=ev=>{
+   if(ev.key!=='Enter')return;
+   ev.preventDefault();
+   artistName.value=artistInput.value.trim();artistInput.value='';
+   artistDialog.style.display='block';actions.push('artist_popup_open');
+  };
+  artistDialog.querySelector('#save button').onclick=()=>{
+   const name=artistName.value.trim();if(!name)return;
+   const chip=document.createElement('ytcp-chip');chip.innerText=name;artistBar.prepend(chip);
+   artistDialog.style.display='none';artistChipDone=true;actions.push('artist_popup_save');syncStepper();
+  };
+ }
+ syncStepper();
  uploadsDialog.querySelector('ytcp-video-metadata-playlists ytcp-dropdown-trigger').onclick=()=>{panel.style.display='block';};
 }
 select.querySelector('[name=PUBLIC]').onclick=()=>actions.push('PUBLIC_NOW');
@@ -151,7 +356,7 @@ async function commitSave(){
  const stamp=Math.floor((Date.UTC(d.year,d.month,d.day)+model.selectedTimeOfDayValue*1000-420*60000)/1000);
  const descriptionValue=description.innerHTML.toLowerCase()==='<br>'?'':(description.childNodes.length===1 && description.firstChild.nodeType===Node.TEXT_NODE?description.textContent:description.innerText);
  const body={encryptedVideoId:config.video.videoId,nativeEditorCommit:true,actions,title:{newTitle:title.innerText},description:{newDescription:descriptionValue},
-  playlists:Array.from(document.querySelectorAll('ytcp-checkbox-lit')).filter(e=>e.querySelector('[role=checkbox]').getAttribute('aria-checked')==='true').map(e=>e.getAttribute('test-id')),
+  playlists:Array.from(document.querySelectorAll('#playlists-list ytcp-checkbox-lit')).filter(e=>e.querySelector('[role=checkbox]').getAttribute('aria-checked')==='true').map(e=>e.getAttribute('test-id')),
   scheduledPublishing:{set:{timeSec:String(stamp),privacy:'PUBLIC'}},model:JSON.parse(JSON.stringify(model)),draftScheduled};
  if(thumbnailDirty)body.thumbnail={customThumbnail:{externalImageId:'IM-new'}};
  setSaveEnabled(false);
@@ -242,6 +447,15 @@ class StudioEditorUnitTests(unittest.TestCase):
             proof = editor.inspect_schedule(CHANNEL, VIDEO)
         self.assertEqual(proof, {"source": "studio_ui", "channel_id": CHANNEL, "video_id": VIDEO, "scheduled": False, "publish_at": None})
 
+    def test_complete_content_ratings_skips_already_completed_step(self):
+        driver = Mock()
+        dialog = Mock()
+        editor = StudioPublishingEditor(StudioThumbnailBrowser())
+        with patch.object(editor, "_draft_step_state", return_value="completed") as state_fn:
+            editor._complete_content_ratings(driver, dialog)
+        state_fn.assert_called_once_with(dialog, "CONTENT_RATINGS")
+        driver.execute_script.assert_not_called()
+
 
 @unittest.skipUnless(os.environ.get('TV_PUBLISHING_BROWSER_TESTS')=='1','opt-in localhost Chrome test')
 class SingleSaveEditorTests(unittest.TestCase):
@@ -260,8 +474,8 @@ class SingleSaveEditorTests(unittest.TestCase):
             channel=SimpleNamespace(id=CHANNEL,cookies=[])
             baseline={'videoId':VIDEO,'channelId':CHANNEL,'title':'Original','description':'Old description','privacy':'VIDEO_PRIVACY_PRIVATE','draftStatus':'DRAFT_STATUS_PUBLIC',
                       'thumbnailEditorState':{'customThumbnail':{'externalImageId':'IM-old'},'defaultStill':False},'thumbnailDetails':{'thumbnails':[]}}
-            def reset(locale, timezone_index=0, draft=False):
-                server.config={'locale':locale,'video':copy.deepcopy(baseline),'scheduled':False,'draft':draft,'playlists':['PL-existing'],
+            def reset(locale, timezone_index=0, draft=False, draft_mode='basic'):
+                server.config={'locale':locale,'video':copy.deepcopy(baseline),'scheduled':False,'draft':draft,'draft_mode':draft_mode,'playlists':['PL-existing'],
                                'model':{'date':{'year':2099,'month':0,'day':3},'selectedTimeOfDayValue':0,'selectedTimezoneIndex':timezone_index}}
             try:
                 with patch('src.studio_publishing_editor._new_driver',return_value=adapter), \
@@ -269,14 +483,16 @@ class SingleSaveEditorTests(unittest.TestCase):
                      patch('src.studio_publishing_editor.inject_cookies_via_cdp'), \
                      patch('src.studio_publishing_editor.close_driver'), \
                      patch('src.publishing_thumbnails.thumbnail_pixels',return_value=bytes([42])*43200):
-                    for label,locale,timezone_index,draft,reference in [
-                        ('vi-standard','vi-VN',0,False,REFERENCE),
-                        ('de-empty','de-DE',1,False,{**REFERENCE,'description':''}),
-                        ('vi-multiline-no-trailing-nl','vi-VN',0,False,MULTILINE_NO_TRAILING_NL),
-                        ('de-draft-dialog','de-DE',1,True,MULTILINE_NO_TRAILING_NL),
+                    for label,locale,timezone_index,draft,draft_mode,reference in [
+                        ('vi-standard','vi-VN',0,False,'basic',REFERENCE),
+                        ('de-empty','de-DE',1,False,'basic',{**REFERENCE,'description':''}),
+                        ('vi-multiline-no-trailing-nl','vi-VN',0,False,'basic',MULTILINE_NO_TRAILING_NL),
+                        ('de-draft-dialog','de-DE',1,True,'basic',MULTILINE_NO_TRAILING_NL),
+                        ('vi-ypp-monetized-draft','vi-VN',0,True,'monetized',MULTILINE_NO_TRAILING_NL),
+                        ('vi-cms-rights-draft','vi-VN',0,True,'cms',MULTILINE_NO_TRAILING_NL),
                     ]:
                         with self.subTest(case=label):
-                            reset(locale,timezone_index,draft=draft)
+                            reset(locale,timezone_index,draft=draft,draft_mode=draft_mode)
                             verifier=ThumbnailReadback(CHANNEL,VIDEO,image,reader=lambda *_:studio_video_from_payload(server.config['video']))
                             controls=StudioThumbnailBrowser(verify_saved=verifier)
                             before=len(server.saves)
@@ -289,7 +505,15 @@ class SingleSaveEditorTests(unittest.TestCase):
                             self.assertEqual(saved['scheduledPublishing']['set'],{'timeSec':str(STAMP),'privacy':'PUBLIC'})
                             self.assertEqual(saved['title']['newTitle'],reference['title']);self.assertEqual(saved['description']['newDescription'],reference['description'])
                             self.assertEqual(saved['playlists'],['PL-first','PL-existing']);self.assertNotIn('PUBLIC_NOW',saved['actions'])
-                            expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','schedule','save'] if draft else ['thumbnail','title','description','playlist','playlist_done','schedule','schedule_done','save']
+                            self.assertNotIn('banner_action',saved['actions'])
+                            if draft_mode=='monetized':
+                                expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','monetization_open','monetization_on','monetization_done','content_ratings_none','content_ratings_submit','schedule','save']
+                            elif draft_mode=='cms':
+                                expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','policy_open','policy_filter','policy_select','policy_apply','ownership_global','artist_popup_open','artist_popup_save','schedule','save']
+                            elif draft:
+                                expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','schedule','save']
+                            else:
+                                expected_order=['thumbnail','title','description','playlist','playlist_done','schedule','schedule_done','save']
                             order=[saved['actions'].index(name) for name in expected_order]
                             self.assertEqual(order,sorted(order))
                             self.assertEqual(server.config['video']['draftStatus'],'DRAFT_STATUS_PUBLIC')
