@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+import time
 from urllib.parse import urlparse
 
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -190,8 +191,18 @@ class NativeSave:
 
 
 class StudioPublishingEditor:
+    MONETIZATION_CONTROLS_GRACE_SECONDS = 3.0
+
     def __init__(self, controls):
         self.controls = controls
+
+    @staticmethod
+    def _is_control_disabled(node):
+        return (
+            not node.is_enabled()
+            or node.get_attribute("disabled") is not None
+            or node.get_attribute("aria-disabled") == "true"
+        )
 
     def _open(self, driver, video_id):
         try:
@@ -542,17 +553,68 @@ class StudioPublishingEditor:
 
         self._wait_draft_idle(dialog)
 
+    def _ensure_audience_selected(self, driver, scope, *, on_progress=lambda step, message: None):
+        host = visible(scope, "ytkc-made-for-kids-select")
+        if host is None:
+            for candidate in scope.find_elements(By.CSS_SELECTOR, "ytkc-made-for-kids-select"):
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                        candidate,
+                    )
+                except WebDriverException:
+                    continue
+                if candidate.is_displayed():
+                    host = candidate
+                    break
+        if host is None:
+            return False
+        radios = [r for r in host.find_elements(By.CSS_SELECTOR, "tp-yt-paper-radio-button") if r.is_displayed()]
+        if not radios:
+            return False
+        if any(r.get_attribute("aria-checked") == "true" for r in radios):
+            return False
+        on_progress("audience", "Đang chọn 'Không, nội dung này không dành cho trẻ em' trong mục Đối tượng người xem…")
+
+        def locate_not_mfk():
+            return visible(
+                scope,
+                "ytkc-made-for-kids-select tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']",
+            )
+
+        self.controls._click_control(
+            driver,
+            locate_not_mfk,
+            selected=lambda el: el.get_attribute("aria-checked") == "true",
+            timeout=15,
+            message="Chưa chọn được 'Không, nội dung này không dành cho trẻ em' trong mục Đối tượng người xem.",
+        )
+        wait_for(
+            lambda: (node := locate_not_mfk()) is not None and node.get_attribute("aria-checked") == "true",
+            timeout=10,
+            message="Studio chưa xác nhận lựa chọn 'Không, nội dung này không dành cho trẻ em'.",
+        )
+        return True
+
     def _complete_monetization(self, driver, dialog):
         panel = wait_for(
             lambda: visible(dialog, "ytcp-uploads-monetization"),
             timeout=20,
             message="Chưa tải được bước Kiếm tiền trong hộp thoại bản nháp Studio.",
         )
+        self._wait_draft_idle(dialog)
+        started = time.monotonic()
         wait_for(
             lambda: (
                 visible(driver, "ytcp-video-monetization-edit-dialog") is not None
                 or visible(panel, "ytcp-dropdown-trigger") is not None
                 or visible(panel, "ytpp-ad-options-settings, ytpp-ad-breaks-settings") is not None
+                or (
+                    time.monotonic() - started >= self.MONETIZATION_CONTROLS_GRACE_SECONDS
+                    and visible(dialog, "tp-yt-paper-progress") is None
+                    and self.controls._button_control(dialog, "#next-button") is not None
+                    and bool((panel.text or "").strip())
+                )
             ),
             timeout=15,
             message="Chưa tải được điều khiển Kiếm tiền trong Studio.",
@@ -561,9 +623,10 @@ class StudioPublishingEditor:
         edit_dialog = visible(driver, "ytcp-video-monetization-edit-dialog")
         if edit_dialog is None:
             trigger = visible(panel, "ytcp-dropdown-trigger")
+            trigger_enabled = trigger is not None and not self._is_control_disabled(trigger)
             ad_options_ready = visible(panel, "ytpp-ad-options-settings, ytpp-ad-breaks-settings") is not None
             next_ready = self.controls._button_control(dialog, "#next-button") is not None
-            if trigger is not None and (not ad_options_ready or not next_ready):
+            if trigger_enabled and (not ad_options_ready or not next_ready):
                 self.controls._click_control(
                     driver,
                     lambda: visible(panel, "ytcp-dropdown-trigger"),
@@ -1017,6 +1080,7 @@ class StudioPublishingEditor:
             on_progress("assign_playlist", "Đang chọn playlist đầu tiên và bấm Xong; chưa bấm Lưu trang…")
             playlist, playlist_changed = self.controls._stage_first_playlist(driver, scope=scope)
             changed = changed or playlist_changed
+            changed = self._ensure_audience_selected(driver, scope, on_progress=on_progress) or changed
             on_progress("schedule_video", "Đang chọn Lên lịch công khai và nhập ngày/giờ UTC+7…")
             if mode == "draft":
                 changed = self._stage_draft_schedule(driver, scope, publish_at, reference=reference, on_progress=on_progress) or changed

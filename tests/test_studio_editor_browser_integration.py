@@ -27,7 +27,15 @@ MULTILINE_NO_TRAILING_NL = {
     "description": "Dòng 1 🎱\n\nDòng 2   https://example.com\n  ▶️ Fanpage: test\n   ☞ Do not Reup",
 }
 FIELDS = '''<div id="title-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>
-<div id="description-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>'''
+<div id="description-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>
+<ytkc-made-for-kids-select>
+ <div class="made-for-kids-rating-container">
+  <tp-yt-paper-radio-group role="radiogroup">
+   <tp-yt-paper-radio-button name="VIDEO_MADE_FOR_KIDS_MFK" role="radio" aria-checked="false" style="display:block">Có, nội dung này dành cho trẻ em</tp-yt-paper-radio-button>
+   <tp-yt-paper-radio-button name="VIDEO_MADE_FOR_KIDS_NOT_MFK" role="radio" aria-checked="false" style="display:block">Không, nội dung này không dành cho trẻ em</tp-yt-paper-radio-button>
+  </tp-yt-paper-radio-group>
+ </div>
+</ytkc-made-for-kids-select>'''
 EDITOR = '''
 <ytcp-video-metadata-editor-sidepanel><ytcp-video-info></ytcp-video-info></ytcp-video-metadata-editor-sidepanel>
 <ytcp-banner class="entity-banner opened" style="display:none"><ytcp-button id="action-1"><ytcp-button-shape><button>Entwurf bearbeiten</button></ytcp-button-shape></ytcp-button></ytcp-banner>
@@ -61,6 +69,14 @@ EDITOR = '''
   <div id="description-textarea"><div id="textbox" contenteditable="true" role="textbox" style="white-space:pre-wrap"></div></div>
   <ytcp-thumbnail-editor><input type="file" accept="image/jpeg" hidden></ytcp-thumbnail-editor>
   <ytcp-video-metadata-playlists><ytcp-dropdown-trigger role="button" style="display:block">Playlists</ytcp-dropdown-trigger></ytcp-video-metadata-playlists>
+  <ytkc-made-for-kids-select>
+   <div class="made-for-kids-rating-container">
+    <tp-yt-paper-radio-group role="radiogroup">
+     <tp-yt-paper-radio-button name="VIDEO_MADE_FOR_KIDS_MFK" role="radio" aria-checked="false" style="display:block">Có, nội dung này dành cho trẻ em</tp-yt-paper-radio-button>
+     <tp-yt-paper-radio-button name="VIDEO_MADE_FOR_KIDS_NOT_MFK" role="radio" aria-checked="false" style="display:block">Không, nội dung này không dành cho trẻ em</tp-yt-paper-radio-button>
+    </tp-yt-paper-radio-group>
+   </div>
+  </ytkc-made-for-kids-select>
  </div>
  <ytcms-video-rights-management-settings style="display:none">
   <ytcms-policy-select class="upload-policy-select">
@@ -79,6 +95,7 @@ EDITOR = '''
  </ytcms-video-rights-management-settings>
  <ytcp-uploads-monetization style="display:none">
   <ytpp-video-monetization-basics>
+   <div id="monetization-ineligible-notice" style="display:none">Video này không đủ điều kiện kiếm tiền do xác nhận quyền sở hữu bản quyền.</div>
    <ytcp-dropdown-trigger id="monetization-trigger" role="button" style="display:none"><span class="dropdown-trigger-text">Chọn</span></ytcp-dropdown-trigger>
    <ytpp-ad-options-settings style="display:none">Hiện quảng cáo trong video của tôi</ytpp-ad-options-settings>
   </ytpp-video-monetization-basics>
@@ -176,8 +193,31 @@ for(const [node,name] of [[title,'title'],[description,'description']])node.addE
  actions.push(name);
  if(!isDraft)setSaveEnabled(true);
 });
-for(const host of document.querySelectorAll('ytcp-checkbox-lit')){const handler=host.onclick;host.onclick=event=>{handler(event);actions.push('playlist');};}
+for(const host of document.querySelectorAll('#playlists-list ytcp-checkbox-lit')){const handler=host.onclick;host.onclick=event=>{handler(event);actions.push('playlist');};}
 document.querySelector('.done-button button').addEventListener('click',()=>actions.push('playlist_done'));
+let madeForKids=(config.made_for_kids===undefined)?'VIDEO_MADE_FOR_KIDS_NOT_MFK':(config.made_for_kids||'');
+const mfkSelect=activeScope.querySelector('ytkc-made-for-kids-select');
+const mfkContainer=mfkSelect?mfkSelect.querySelector('.made-for-kids-rating-container'):null;
+const mfkRadios=mfkSelect?Array.from(mfkSelect.querySelectorAll('tp-yt-paper-radio-button')):[];
+let syncStepperHook=null;
+function syncMfk(){
+ if(!mfkContainer)return;
+ if(madeForKids)mfkContainer.removeAttribute('has-error');
+ else mfkContainer.setAttribute('has-error','Bạn cần phải trả lời câu hỏi này');
+ for(const r of mfkRadios){
+  r.setAttribute('aria-checked',r.getAttribute('name')===madeForKids?'true':'false');
+ }
+}
+syncMfk();
+for(const r of mfkRadios){
+ r.onclick=()=>{
+  madeForKids=r.getAttribute('name')||'';
+  syncMfk();
+  actions.push(madeForKids==='VIDEO_MADE_FOR_KIDS_NOT_MFK'?'audience_not_mfk':'audience_mfk');
+  if(!isDraft)setSaveEnabled(true);
+  else if(syncStepperHook)syncStepperHook();
+ };
+}
 if(!isDraft){
  document.querySelector('ytcp-video-metadata-visibility #select-button').onclick=()=>{baselineModel=JSON.parse(JSON.stringify(scheduler.model));working=draftScheduled;render();popupEnabled(false);visibilityPanel.style.display='block';};
 } else {
@@ -209,11 +249,14 @@ if(!isDraft){
  let visibleSteps=['DETAILS','REVIEW'];
  if(draftMode==='monetized'){
   visibleSteps=['DETAILS','MONETIZATION','VIDEO_ELEMENTS','CHECKS','REVIEW'];
+ } else if(draftMode==='monetized_ineligible'){
+  visibleSteps=['DETAILS','MONETIZATION','VIDEO_ELEMENTS','CHECKS','REVIEW'];
  } else if(draftMode==='cms'){
   visibleSteps=['DETAILS','RIGHTS_MANAGEMENT','VIDEO_ELEMENTS','CHECKS','REVIEW'];
  }
  function rightsComplete(){return policyValue==='Monetize in all countries' && ownershipGlobal && artistChipDone;}
  function draftReadyToPublish(){
+  if(!madeForKids)return false;
   if(draftMode==='monetized')return monetizationOn && ratingsCompleted;
   if(draftMode==='cms')return rightsComplete() && monetizationOn;
   return true;
@@ -234,12 +277,13 @@ if(!isDraft){
   Object.entries(stepPanels).forEach(([id,panel])=>{panel.style.display=(id===activeStep)?'block':'none';});
   const isReview=activeStep==='REVIEW';
   nextHost.style.display=isReview?'none':'';
-  const nextBlocked=(activeStep==='RIGHTS_MANAGEMENT' && !rightsComplete()) || (activeStep==='CONTENT_RATINGS' && !ratingsCompleted);
+  const nextBlocked=(activeStep==='DETAILS' && !madeForKids) || (activeStep==='RIGHTS_MANAGEMENT' && !rightsComplete()) || (activeStep==='CONTENT_RATINGS' && !ratingsCompleted);
   nextBtn.disabled=nextBlocked;nextHost.setAttribute('aria-disabled',nextBlocked?'true':'false');
   const doneDisabled=!draftReadyToPublish();
   doneBtn.disabled=doneDisabled;doneHost.setAttribute('aria-disabled',doneDisabled?'true':'false');
   if(activeStep==='REVIEW'){working=draftScheduled;render();}
  }
+ syncStepperHook=syncStepper;
  function goStep(id){
   if(!visibleSteps.includes(id))return;
   activeStep=id;
@@ -275,6 +319,8 @@ if(!isDraft){
    ratingsCompleted=true;stepTabs.CONTENT_RATINGS.setAttribute('state','completed');
    actions.push('content_ratings_submit');syncStepper();
   };
+ } else if(draftMode==='monetized_ineligible'){
+  stepPanels.MONETIZATION.querySelector('#monetization-ineligible-notice').style.display='block';
  } else if(draftMode==='cms'){
   const policyDialog=document.querySelector('tp-yt-paper-dialog[aria-label="policy-dialog"]');
   const policyTrigger=stepPanels.RIGHTS_MANAGEMENT.querySelector('ytcms-policy-select ytcp-dropdown-trigger');
@@ -355,7 +401,7 @@ async function commitSave(){
  actions.push('save');const model=scheduler.model,d=model.date;
  const stamp=Math.floor((Date.UTC(d.year,d.month,d.day)+model.selectedTimeOfDayValue*1000-420*60000)/1000);
  const descriptionValue=description.innerHTML.toLowerCase()==='<br>'?'':(description.childNodes.length===1 && description.firstChild.nodeType===Node.TEXT_NODE?description.textContent:description.innerText);
- const body={encryptedVideoId:config.video.videoId,nativeEditorCommit:true,actions,title:{newTitle:title.innerText},description:{newDescription:descriptionValue},
+ const body={encryptedVideoId:config.video.videoId,nativeEditorCommit:true,actions,madeForKids,title:{newTitle:title.innerText},description:{newDescription:descriptionValue},
   playlists:Array.from(document.querySelectorAll('#playlists-list ytcp-checkbox-lit')).filter(e=>e.querySelector('[role=checkbox]').getAttribute('aria-checked')==='true').map(e=>e.getAttribute('test-id')),
   scheduledPublishing:{set:{timeSec:String(stamp),privacy:'PUBLIC'}},model:JSON.parse(JSON.stringify(model)),draftScheduled};
  if(thumbnailDirty)body.thumbnail={customThumbnail:{externalImageId:'IM-new'}};
@@ -388,6 +434,8 @@ class EditorFixture(BaseHTTPRequestHandler):
             else:
                 if not payload.get('nativeEditorCommit') or payload.get('draftScheduled') is not True:
                     raise AssertionError('Only the native final editor Save is supported')
+                if not payload.get('madeForKids'):
+                    raise AssertionError('Made for Kids must be selected before saving')
                 config=self.server.config;video=config['video']
                 video.update(title=payload['title']['newTitle'],description=payload['description']['newDescription'])
                 if 'thumbnail' in payload:video['thumbnailEditorState']={'customThumbnail':{'externalImageId':'IM-new'},'defaultStill':False,'stillId':0}
@@ -395,7 +443,7 @@ class EditorFixture(BaseHTTPRequestHandler):
                 # Deliberately retain the stale draft enum that broke API-only
                 # confirmation, while the persisted Studio UI is Scheduled.
                 video['draftStatus']='DRAFT_STATUS_PUBLIC'
-                config.update(model=payload['model'],scheduled=True,draft=False,playlists=payload['playlists'])
+                config.update(model=payload['model'],scheduled=True,draft=False,playlists=payload['playlists'],made_for_kids=payload['madeForKids'])
                 response={'video':video}
         data=json.dumps(response).encode()
         self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
@@ -482,6 +530,106 @@ class StudioEditorUnitTests(unittest.TestCase):
         self.assertIsInstance(results[VIDEO], PublishingBrowserError)
         self.assertEqual(results["VideoTwo___"], good)
 
+    def test_ensure_audience_selected_skips_when_widget_absent(self):
+        driver = Mock()
+        scope = Mock()
+        scope.find_elements.return_value = []
+        editor = StudioPublishingEditor(StudioThumbnailBrowser())
+        with patch("src.studio_publishing_editor.visible", return_value=None):
+            self.assertFalse(editor._ensure_audience_selected(driver, scope))
+
+    def test_ensure_audience_selected_skips_when_already_checked(self):
+        driver = Mock()
+        scope = Mock()
+        host = Mock()
+        r_yes = Mock(is_displayed=Mock(return_value=True))
+        r_yes.get_attribute.side_effect = lambda attr: "true" if attr == "aria-checked" else None
+        r_no = Mock(is_displayed=Mock(return_value=True))
+        r_no.get_attribute.side_effect = lambda attr: "false" if attr == "aria-checked" else None
+        host.find_elements.return_value = [r_yes, r_no]
+        controls = StudioThumbnailBrowser()
+        controls._click_control = Mock()
+        editor = StudioPublishingEditor(controls)
+        with patch("src.studio_publishing_editor.visible", return_value=host):
+            self.assertFalse(editor._ensure_audience_selected(driver, scope))
+        controls._click_control.assert_not_called()
+
+    def test_ensure_audience_selected_selects_not_mfk_when_unanswered(self):
+        driver = Mock()
+        scope = Mock()
+        host = Mock()
+        r_yes = Mock(is_displayed=Mock(return_value=True))
+        r_yes.get_attribute.side_effect = lambda attr: "false" if attr == "aria-checked" else None
+        not_mfk_state = {"checked": "false"}
+        r_no = Mock(is_displayed=Mock(return_value=True))
+        r_no.get_attribute.side_effect = lambda attr: not_mfk_state["checked"] if attr == "aria-checked" else None
+        host.find_elements.return_value = [r_yes, r_no]
+        controls = StudioThumbnailBrowser()
+        controls._click_control = Mock(side_effect=lambda *args, **kwargs: not_mfk_state.__setitem__("checked", "true"))
+        editor = StudioPublishingEditor(controls)
+        progress = []
+
+        def fake_visible(node, selector):
+            if node is scope and selector == "ytkc-made-for-kids-select":
+                return host
+            if node is scope and "VIDEO_MADE_FOR_KIDS_NOT_MFK" in selector:
+                return r_no
+            return None
+
+        with patch("src.studio_publishing_editor.visible", side_effect=fake_visible):
+            changed = editor._ensure_audience_selected(
+                driver,
+                scope,
+                on_progress=lambda step, message: progress.append((step, message)),
+            )
+        self.assertTrue(changed)
+        controls._click_control.assert_called_once()
+        self.assertEqual(progress[0][0], "audience")
+
+    def test_complete_monetization_passes_locked_trigger_when_next_enabled(self):
+        driver = Mock()
+        dialog = Mock()
+        panel = Mock(text="Kiếm tiền bị tắt cho video này")
+        trigger = Mock()
+        trigger.is_enabled.return_value = True
+        trigger.get_attribute.side_effect = lambda attr: "true" if attr == "aria-disabled" else None
+        next_btn = Mock()
+        controls = StudioThumbnailBrowser()
+        controls._click_control = Mock()
+        controls._button_control = Mock(side_effect=lambda scope, sel: next_btn if sel == "#next-button" else None)
+        editor = StudioPublishingEditor(controls)
+
+        def fake_visible(scope, selector):
+            if scope is dialog and selector == "ytcp-uploads-monetization":
+                return panel
+            if scope is panel and selector == "ytcp-dropdown-trigger":
+                return trigger
+            return None
+
+        with patch("src.studio_publishing_editor.visible", side_effect=fake_visible):
+            editor._complete_monetization(driver, dialog)
+        controls._click_control.assert_not_called()
+
+    def test_complete_monetization_passes_ineligible_panel_without_trigger_when_next_enabled(self):
+        driver = Mock()
+        dialog = Mock()
+        panel = Mock(text="Video này không đủ điều kiện kiếm tiền do xác nhận quyền sở hữu bản quyền.")
+        next_btn = Mock()
+        controls = StudioThumbnailBrowser()
+        controls._click_control = Mock()
+        controls._button_control = Mock(side_effect=lambda scope, sel: next_btn if sel == "#next-button" else None)
+        editor = StudioPublishingEditor(controls)
+
+        def fake_visible(scope, selector):
+            if scope is dialog and selector == "ytcp-uploads-monetization":
+                return panel
+            return None
+
+        with patch.object(StudioPublishingEditor, "MONETIZATION_CONTROLS_GRACE_SECONDS", 0.0), \
+                patch("src.studio_publishing_editor.visible", side_effect=fake_visible):
+            editor._complete_monetization(driver, dialog)
+        controls._click_control.assert_not_called()
+
 
 @unittest.skipUnless(os.environ.get('TV_PUBLISHING_BROWSER_TESTS')=='1','opt-in localhost Chrome test')
 class SingleSaveEditorTests(unittest.TestCase):
@@ -500,8 +648,8 @@ class SingleSaveEditorTests(unittest.TestCase):
             channel=SimpleNamespace(id=CHANNEL,cookies=[])
             baseline={'videoId':VIDEO,'channelId':CHANNEL,'title':'Original','description':'Old description','privacy':'VIDEO_PRIVACY_PRIVATE','draftStatus':'DRAFT_STATUS_PUBLIC',
                       'thumbnailEditorState':{'customThumbnail':{'externalImageId':'IM-old'},'defaultStill':False},'thumbnailDetails':{'thumbnails':[]}}
-            def reset(locale, timezone_index=0, draft=False, draft_mode='basic'):
-                server.config={'locale':locale,'video':copy.deepcopy(baseline),'scheduled':False,'draft':draft,'draft_mode':draft_mode,'playlists':['PL-existing'],
+            def reset(locale, timezone_index=0, draft=False, draft_mode='basic', made_for_kids='VIDEO_MADE_FOR_KIDS_NOT_MFK'):
+                server.config={'locale':locale,'video':copy.deepcopy(baseline),'scheduled':False,'draft':draft,'draft_mode':draft_mode,'made_for_kids':made_for_kids,'playlists':['PL-existing'],
                                'model':{'date':{'year':2099,'month':0,'day':3},'selectedTimeOfDayValue':0,'selectedTimezoneIndex':timezone_index}}
             try:
                 with patch('src.studio_publishing_editor._new_driver',return_value=adapter), \
@@ -509,16 +657,19 @@ class SingleSaveEditorTests(unittest.TestCase):
                      patch('src.studio_publishing_editor.inject_cookies_via_cdp'), \
                      patch('src.studio_publishing_editor.close_driver'), \
                      patch('src.publishing_thumbnails.thumbnail_pixels',return_value=bytes([42])*43200):
-                    for label,locale,timezone_index,draft,draft_mode,reference in [
-                        ('vi-standard','vi-VN',0,False,'basic',REFERENCE),
-                        ('de-empty','de-DE',1,False,'basic',{**REFERENCE,'description':''}),
-                        ('vi-multiline-no-trailing-nl','vi-VN',0,False,'basic',MULTILINE_NO_TRAILING_NL),
-                        ('de-draft-dialog','de-DE',1,True,'basic',MULTILINE_NO_TRAILING_NL),
-                        ('vi-ypp-monetized-draft','vi-VN',0,True,'monetized',MULTILINE_NO_TRAILING_NL),
-                        ('vi-cms-rights-draft','vi-VN',0,True,'cms',MULTILINE_NO_TRAILING_NL),
+                    for label,locale,timezone_index,draft,draft_mode,made_for_kids,reference in [
+                        ('vi-standard','vi-VN',0,False,'basic','VIDEO_MADE_FOR_KIDS_NOT_MFK',REFERENCE),
+                        ('vi-standard-unanswered-mfk','vi-VN',0,False,'basic','',REFERENCE),
+                        ('de-empty','de-DE',1,False,'basic','VIDEO_MADE_FOR_KIDS_NOT_MFK',{**REFERENCE,'description':''}),
+                        ('vi-multiline-no-trailing-nl','vi-VN',0,False,'basic','VIDEO_MADE_FOR_KIDS_NOT_MFK',MULTILINE_NO_TRAILING_NL),
+                        ('de-draft-dialog','de-DE',1,True,'basic','VIDEO_MADE_FOR_KIDS_NOT_MFK',MULTILINE_NO_TRAILING_NL),
+                        ('vi-draft-preserves-existing-mfk','vi-VN',0,True,'basic','VIDEO_MADE_FOR_KIDS_MFK',REFERENCE),
+                        ('vi-ypp-monetized-draft','vi-VN',0,True,'monetized','VIDEO_MADE_FOR_KIDS_NOT_MFK',MULTILINE_NO_TRAILING_NL),
+                        ('vi-claimed-unanswered-mfk-draft','vi-VN',0,True,'monetized_ineligible','',MULTILINE_NO_TRAILING_NL),
+                        ('vi-cms-rights-draft','vi-VN',0,True,'cms','VIDEO_MADE_FOR_KIDS_NOT_MFK',MULTILINE_NO_TRAILING_NL),
                     ]:
                         with self.subTest(case=label):
-                            reset(locale,timezone_index,draft=draft,draft_mode=draft_mode)
+                            reset(locale,timezone_index,draft=draft,draft_mode=draft_mode,made_for_kids=made_for_kids)
                             verifier=ThumbnailReadback(CHANNEL,VIDEO,image,reader=lambda *_:studio_video_from_payload(server.config['video']))
                             controls=StudioThumbnailBrowser(verify_saved=verifier)
                             before=len(server.saves)
@@ -532,12 +683,22 @@ class SingleSaveEditorTests(unittest.TestCase):
                             self.assertEqual(saved['title']['newTitle'],reference['title']);self.assertEqual(saved['description']['newDescription'],reference['description'])
                             self.assertEqual(saved['playlists'],['PL-first','PL-existing']);self.assertNotIn('PUBLIC_NOW',saved['actions'])
                             self.assertNotIn('banner_action',saved['actions'])
+                            expected_mfk = made_for_kids or 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
+                            self.assertEqual(saved['madeForKids'], expected_mfk)
+                            if made_for_kids:
+                                self.assertNotIn('audience_not_mfk', saved['actions'])
                             if draft_mode=='monetized':
                                 expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','monetization_open','monetization_on','monetization_done','content_ratings_none','content_ratings_submit','schedule','save']
+                            elif draft_mode=='monetized_ineligible':
+                                expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','audience_not_mfk','schedule','save']
                             elif draft_mode=='cms':
                                 expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','policy_open','policy_filter','policy_select','policy_apply','ownership_global','artist_popup_open','artist_popup_save','schedule','save']
+                            elif draft and not made_for_kids:
+                                expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','audience_not_mfk','schedule','save']
                             elif draft:
                                 expected_order=['open_draft','thumbnail','title','description','playlist','playlist_done','schedule','save']
+                            elif not made_for_kids:
+                                expected_order=['thumbnail','title','description','playlist','playlist_done','audience_not_mfk','schedule','schedule_done','save']
                             else:
                                 expected_order=['thumbnail','title','description','playlist','playlist_done','schedule','schedule_done','save']
                             order=[saved['actions'].index(name) for name in expected_order]
